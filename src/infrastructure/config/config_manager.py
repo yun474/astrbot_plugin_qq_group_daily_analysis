@@ -229,6 +229,69 @@ class ConfigManager:
             },
         ]
 
+    def get_t2i_render_backend(self) -> str:
+        """Get the configured HTML-to-image render backend."""
+        group = self._get_group("t2i_rendering")
+        backend = str(group.get("t2i_render_backend", "astrbot")).strip().lower()
+        valid_backends = {"astrbot", "local_browser", "local_first", "astrbot_first"}
+        if backend not in valid_backends:
+            logger.warning(
+                f"Invalid t2i_render_backend '{backend}', falling back to astrbot"
+            )
+            return "astrbot"
+        return backend
+
+    def get_local_browser_viewport_width(self) -> int:
+        """Get local browser viewport width for report rendering."""
+        return self._get_int_in_range(
+            "t2i_rendering", "local_browser_viewport_width", 1080, 320, 2400
+        )
+
+    def get_local_browser_viewport_height(self) -> int:
+        """Get local browser viewport height for report rendering."""
+        return self._get_int_in_range(
+            "t2i_rendering", "local_browser_viewport_height", 1600, 320, 4000
+        )
+
+    def get_local_browser_extra_wait_ms(self) -> int:
+        """Get extra wait time after local browser page load."""
+        return self._get_int_in_range(
+            "t2i_rendering", "local_browser_extra_wait_ms", 500, 0, 10000
+        )
+
+    def get_local_browser_wait_until(self) -> str:
+        """Get Playwright set_content wait condition."""
+        value = (
+            str(
+                self._get_group("t2i_rendering").get(
+                    "local_browser_wait_until", "networkidle"
+                )
+            )
+            .strip()
+            .lower()
+        )
+        if value not in {"load", "domcontentloaded", "networkidle"}:
+            return "networkidle"
+        return value
+
+    def get_local_browser_no_sandbox(self) -> bool:
+        """Whether to launch Chromium with no-sandbox flags."""
+        value = self._get_group("t2i_rendering").get(
+            "local_browser_no_sandbox", True
+        )
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(value)
+
+    def _get_int_in_range(
+        self, group_name: str, key: str, default: int, minimum: int, maximum: int
+    ) -> int:
+        try:
+            value = int(self._get_group(group_name).get(key, default))
+        except Exception:
+            return default
+        return min(maximum, max(minimum, value))
+
     def get_t2i_font_source(self) -> str:
         """获取 T2I 字体源 (Mainland/Overseas)"""
         return self._get_group("t2i_rendering").get("t2i_font_source", "Overseas")

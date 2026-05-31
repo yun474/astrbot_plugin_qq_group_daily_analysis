@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import base64
 import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -44,6 +45,7 @@ from .src.infrastructure.platform.template_preview import (
     TemplatePreviewRouter,
 )
 from .src.infrastructure.reporting.generators import ReportGenerator
+from .src.infrastructure.reporting.local_browser_renderer import LocalBrowserRenderer
 from .src.infrastructure.scheduler.auto_scheduler import AutoScheduler
 from .src.shared.trace_context import TraceContext, TraceLogFilter
 from .src.utils.logger import logger
@@ -59,6 +61,7 @@ class GroupDailyAnalysis(Star):
     bot_manager: BotManager
     history_manager: HistoryManager
     report_generator: ReportGenerator
+    local_browser_renderer: LocalBrowserRenderer
     telegram_group_registry: TelegramGroupRegistry
     statistics_service: StatisticsService
     analysis_domain_service: AnalysisDomainService
@@ -99,6 +102,10 @@ class GroupDailyAnalysis(Star):
             )
 
         self.report_generator = ReportGenerator(self.config_manager, plugin_data_dir)
+        self.local_browser_renderer = LocalBrowserRenderer(
+            self.config_manager, plugin_data_dir
+        )
+        self._astrbot_html_render = self.html_render
 
         # Telegram 注册表 (持久层)
         self.telegram_group_registry = TelegramGroupRegistry(self)
@@ -149,7 +156,7 @@ class GroupDailyAnalysis(Star):
             self.analysis_service,
             self.bot_manager,
             self.report_generator,
-            self.html_render,
+            self._html_render_with_strategy,
             plugin_instance=self,
         )
 
@@ -237,6 +244,89 @@ class GroupDailyAnalysis(Star):
             except Exception as e:
                 logger.error(f"插件初始化失败: {e}", exc_info=True)
 
+    async def _html_render_with_strategy(
+        self,
+        html_content: str,
+        data: dict | None = None,
+        return_url: bool = False,
+        image_options: dict | None = None,
+    ):
+        backend = self.config_manager.get_t2i_render_backend()
+
+        if backend in ("astrbot", "local_browser"):
+            return await self._render_html_with_backend(
+                backend, html_content, data, return_url, image_options
+            )
+
+        order = (
+            ("local_browser", "astrbot")
+            if backend == "local_first"
+            else ("astrbot", "local_browser")
+        )
+        last_result = None
+        last_error = None
+
+        for candidate in order:
+            try:
+                result = await self._render_html_with_backend(
+                    candidate, html_content, data, return_url, image_options
+                )
+                if self._is_image_render_result_valid(result):
+                    return result
+                if result:
+                    last_result = result
+                logger.warning(
+                    f"[T2I] {candidate} returned invalid image data; trying fallback"
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[T2I] {candidate} render failed: {e}")
+
+        if last_result:
+            return last_result
+        if last_error:
+            raise last_error
+        return None
+
+    async def _render_html_with_backend(
+        self,
+        backend: str,
+        html_content: str,
+        data: dict | None,
+        return_url: bool,
+        image_options: dict | None,
+    ):
+        if backend == "local_browser":
+            return await self.local_browser_renderer.render(
+                html_content, data or {}, return_url, image_options or {}
+            )
+        return await self._astrbot_html_render(
+            html_content, data or {}, return_url, image_options or {}
+        )
+
+    @staticmethod
+    def _is_image_render_result_valid(result) -> bool:
+        if isinstance(result, bytes):
+            return result.startswith(b"\xff\xd8") or result.startswith(b"\x89PNG")
+
+        if isinstance(result, str):
+            if result.startswith("base64://"):
+                try:
+                    head = base64.b64decode(result[len("base64://") :])[:10]
+                    return head.startswith(b"\xff\xd8") or head.startswith(b"\x89PNG")
+                except Exception:
+                    return False
+            if os.path.exists(result):
+                try:
+                    with open(result, "rb") as f:
+                        head = f.read(10)
+                    return head.startswith(b"\xff\xd8") or head.startswith(b"\x89PNG")
+                except Exception:
+                    return False
+            return result.startswith(("http://", "https://", "file://"))
+
+        return False
+
     async def terminate(self):
         """插件被卸载/停用时调用，清理资源"""
         if self._terminating:
@@ -267,6 +357,9 @@ class GroupDailyAnalysis(Star):
 
             if self.template_preview_router:
                 await self.template_preview_router.unregister_handlers()
+
+            if self.local_browser_renderer:
+                await self.local_browser_renderer.close()
 
             if self.report_generator:
                 await self.report_generator.close()
@@ -602,7 +695,7 @@ class GroupDailyAnalysis(Star):
             image_url, html_content = await self.report_generator.generate_image_report(
                 analysis_result,
                 group_id,
-                self.html_render,
+                self._html_render_with_strategy,
                 avatar_url_getter=avatar_url_getter,
                 nickname_getter=nickname_getter,
                 avatar_cache_namespace=platform_id,

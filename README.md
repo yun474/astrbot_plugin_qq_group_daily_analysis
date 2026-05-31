@@ -111,8 +111,17 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot)**�
 > 
 > - **增加超时时间**：若日报极其复杂（包含大量内联 CSS/JS/图表），请将 `渲染超时 (ms)` 调大。建议范围：30,000ms - 180,000ms (3 分钟)。
 > - **优化回退策略**：建议第一轮使用 `png` + `ultra` 追求极致清晰；第二轮作为回退，建议使用 `jpeg` + `high/normal` 分辨率并配合更长的超时时间，以确保即使在资源受限的情况下也能产出报告。
+>
+> ### 2. 使用本地浏览器渲染
+> 如果 AstrBot 自带 T2I 服务不稳定，且你的 AstrBot 容器内已经安装可用的 Playwright/Chromium，可在 **图片渲染策略 (`t2i_rendering`)** 中将 `HTML 转图片后端` 设置为：
+>
+> - `local_browser`：只使用本地 Playwright/Chromium 截图。
+> - `local_first`：优先本地截图，失败后回退 AstrBot T2I。
+> - `astrbot_first`：优先 AstrBot T2I，失败后回退本地截图。
+>
+> Docker 容器内通常需要保持 `本地 Chromium 禁用沙箱` 开启；本地渲染会占用更多 CPU/内存，建议 `最大T2I渲染并发数` 保持为 `1`。
 > 
-> ### 2. 使用备用 T2I 服务或自部署
+> ### 3. 使用备用 T2I 服务或自部署
 > <details>
 > <summary><b>若配置调整后渲染仍频繁失败，可尝试更换 T2I 服务（点击展开）：</b></summary>
 >

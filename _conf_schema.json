@@ -144,6 +144,59 @@
         "type": "object",
         "hint": "配置 HTML 转图片的渲染参数。支持两轮尝试：第一轮优先保证质量，第二轮作为回退方案，建议使用更低的分辨率和质量以提高成功率。",
         "items": {
+            "t2i_render_backend": {
+                "type": "string",
+                "description": "HTML 转图片后端",
+                "options": ["astrbot", "local_browser", "local_first", "astrbot_first"],
+                "default": "astrbot",
+                "hint": "astrbot=使用 AstrBot 自带 T2I；local_browser=使用容器内 Playwright/Chromium 本地截图；local_first/astrbot_first=按顺序失败后自动回退。默认保持 astrbot，避免影响现有部署。"
+            },
+            "local_browser_viewport_width": {
+                "type": "int",
+                "description": "本地浏览器视口宽度",
+                "default": 1080,
+                "slider": {
+                    "min": 320,
+                    "max": 2400,
+                    "step": 20
+                },
+                "hint": "仅在本地浏览器渲染时生效。影响模板响应式布局和最终截图宽度。"
+            },
+            "local_browser_viewport_height": {
+                "type": "int",
+                "description": "本地浏览器视口高度",
+                "default": 1600,
+                "slider": {
+                    "min": 320,
+                    "max": 4000,
+                    "step": 20
+                },
+                "hint": "仅在本地浏览器渲染时生效。截图仍默认 full_page，此值主要影响首屏布局计算。"
+            },
+            "local_browser_wait_until": {
+                "type": "string",
+                "description": "本地浏览器等待条件",
+                "options": ["load", "domcontentloaded", "networkidle"],
+                "default": "networkidle",
+                "hint": "networkidle 会尽量等待外链资源完成，稳定但可能更慢；外链不稳定时可改为 load 或 domcontentloaded。"
+            },
+            "local_browser_extra_wait_ms": {
+                "type": "int",
+                "description": "本地浏览器额外等待 (ms)",
+                "default": 500,
+                "slider": {
+                    "min": 0,
+                    "max": 10000,
+                    "step": 100
+                },
+                "hint": "页面加载完成后截图前额外等待，用于头像、字体、外链图片等资源缓冲。"
+            },
+            "local_browser_no_sandbox": {
+                "type": "bool",
+                "description": "本地 Chromium 禁用沙箱",
+                "default": true,
+                "hint": "Docker 容器内通常需要开启，否则 Chromium 可能无法启动；非容器环境可按需关闭。"
+            },
             "t2i_r1_type": {
                 "type": "string",
                 "description": "第一轮：图片格式",
