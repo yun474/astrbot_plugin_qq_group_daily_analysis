@@ -486,6 +486,7 @@ class BotManager:
         if bot_instance:
             # 从事件中获取平台ID
             platform_id = None
+            platform_name = None
             if hasattr(event, "get_platform_id"):
                 platform_id = event.get_platform_id()
             elif hasattr(event, "platform_meta") and hasattr(event.platform_meta, "id"):
@@ -493,7 +494,13 @@ class BotManager:
             elif hasattr(event, "platform") and isinstance(event.platform, str):
                 platform_id = event.platform
 
-            self.set_bot_instance(bot_instance, platform_id)
+            if hasattr(event, "get_platform_name"):
+                try:
+                    platform_name = event.get_platform_name()
+                except Exception:
+                    platform_name = None
+
+            self.set_bot_instance(bot_instance, platform_id, platform_name)
 
             # 优先从事件中提取机器人自身 ID，避免获取到 functools.partial 等异常对象
             bot_self_id = None

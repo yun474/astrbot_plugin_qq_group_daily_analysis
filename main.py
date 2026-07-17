@@ -670,6 +670,7 @@ class GroupDailyAnalysis(Star):
         analysis_result = result["analysis_result"]
         adapter = result["adapter"]
         output_format = self.config_manager.get_output_format()
+        is_qq_official_history = bool(getattr(adapter, "uses_history_cache", False))
 
         # 定义获取回调
         async def avatar_url_getter(user_id: str) -> str | None:
@@ -696,6 +697,13 @@ class GroupDailyAnalysis(Star):
 
             if image_url:
                 caption = TraceContext.make_report_caption()
+                if is_qq_official_history:
+                    # QQ 官方 Bot 在旧版 AstrBot 中不支持 send_by_session。
+                    # 手动命令直接借当前事件回复，兼容范围最稳。
+                    yield event.image_result(image_url)
+                    if caption:
+                        yield event.plain_result(caption)
+                    return
                 sent = await adapter.send_image(group_id, image_url, caption=caption)
                 if sent:
                     await self._try_upload_image(group_id, image_url, platform_id)
@@ -704,6 +712,9 @@ class GroupDailyAnalysis(Star):
             # 如果图片生成或发送失败，直接回退到文本
             logger.warning(f"图片报告发送失败，正在发送文本回退报告。群: {group_id}")
             text_report = self.report_generator.generate_text_report(analysis_result)
+            if is_qq_official_history:
+                yield event.plain_result(text_report)
+                return
             await adapter.send_text_report(group_id, text_report)
             return
 
@@ -749,6 +760,14 @@ class GroupDailyAnalysis(Star):
 
                 caption = self.report_generator.build_html_caption(html_path)
 
+                if is_qq_official_history:
+                    yield event.chain_result(
+                        [File(name=Path(html_path).name, file=html_path)]
+                    )
+                    if caption:
+                        yield event.plain_result(caption)
+                    return
+
                 # 发送 HTML 文件
                 sender = getattr(self, "message_sender", None)
                 if sender:
@@ -775,6 +794,9 @@ class GroupDailyAnalysis(Star):
 
         else:
             text_report = self.report_generator.generate_text_report(analysis_result)
+            if is_qq_official_history:
+                yield event.plain_result(text_report)
+                return
             await adapter.send_text_report(group_id, text_report)
 
     @filter.command("设置格式", alias={"set_format"})

@@ -2,7 +2,7 @@
 
 # 群聊日常分析插件
 
-[![Plugin Version](https://img.shields.io/badge/Latest_Version-v4.10.9-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/SXP-Simon/astrbot-qq-group-daily-analysis)
+[![Plugin Version](https://img.shields.io/badge/Latest_Version-v4.10.10-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/yun474/astrbot_plugin_qq_group_daily_analysis)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-ff69b4?style=for-the-badge)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis) 
@@ -23,7 +23,7 @@
 </table>
 
 
-_✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot)**、**Telegram**、**Discord**，未来支持更多平台。 [灵感来源](https://github.com/LSTM-Kirigaya/openmcp-tutorial/tree/main/qq-group-summary)。 ✨_
+_✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / 官方 Bot)**、**Telegram**、**Discord**，未来支持更多平台。 [灵感来源](https://github.com/LSTM-Kirigaya/openmcp-tutorial/tree/main/qq-group-summary)。 ✨_
 
 <img src="https://count.getloli.com/@astrbot-qq-group-daily-analysis?name=astrbot-qq-group-daily-analysis&theme=booru-jaypee&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="count" />
 </div>
@@ -87,8 +87,25 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot)**�
 
 > [!warning]
 > **实验性开发中**：
-> - 多平台支持功能尚在开发中，当前仅支持QQ OneBot, Discord, Telegram。
+> - 多平台支持功能尚在开发中，当前支持 QQ OneBot、QQ 官方 Bot、Discord、Telegram；Feishu / Lark 仍属 WIP。
 > - 旧版本稳定版在[QQ 分支](https://github.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis/tree/QQ)，仅 QQ 平台支持
+
+> [!IMPORTANT]
+> **QQ 官方 Bot 模式必须安装前置插件**
+>
+> QQ 官方 API 不提供群历史消息拉取接口，本插件不会假装能从空气里捞记录。请先安装并启用云云的历史消息插件：
+>
+> - 前置插件：[`yun474/astrbot_plugin_quote_cache`](https://github.com/yun474/astrbot_plugin_quote_cache)
+> - 安装地址：`https://github.com/yun474/astrbot_plugin_quote_cache`
+> - 建议版本：`v1.0.0` 或更高
+>
+> 两个插件必须运行在同一个 AstrBot 实例、共享同一个 `data` 目录。群分析插件会以只读方式打开：
+>
+> ```text
+> data/plugin_data/astrbot_plugin_quote_cache/messages.sqlite3
+> ```
+>
+> 官方 Bot 收到消息后由前置插件持续缓存。执行 `/群分析` 时，本插件按当前 QQ 官方平台实例和当前群 OpenID 读取 `analysis_days` 范围内的消息，默认 1 天，并继续使用本插件原有的 `max_messages` 上限。图片不会下载给分析插件，只会以 `[图片]` 占位符参与统计。
 
 
 > [!CAUTION]
@@ -162,7 +179,7 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot)**�
 
 
 ### 🛠️ 灵活配置
-- **多平台支持**: 自动识别并适配 OneBot, Discord, Telegram 等平台
+- **多平台支持**: 自动识别并适配 OneBot、QQ 官方 Bot、Discord、Telegram 等平台
 - **群组管理**: 支持指定特定群组启用功能（支持跨平台黑白名单）
 - **参数调节**: 可自定义分析天数、消息数量等参数
 - **定时任务**: 支持设置每日自动分析时间
@@ -293,6 +310,7 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot)**�
 | 平台 | 适配器类型 | 特殊要求/说明 |
 |------|-----------|--------------|
 | **QQ** | OneBot v11 | 建议使用 NapCat/Lagrange。需注意消息分页拉取限制。 |
+| **QQ 官方 Bot** | `qq_official` / `qq_official_webhook` | 必须先安装[历史消息搜索插件](https://github.com/yun474/astrbot_plugin_quote_cache)。只分析平台实际推送并成功缓存的消息，仍受 `max_messages` 限制。 |
 | **Discord** | Discord | **必须** 拥有 `Read Message History` (查看消息历史记录) 权限。 |
 | **Telegram** | Telegram Bot API | 若机器人不是群管理员，入群前需先在 BotFather 关闭隐私模式 (`/setprivacy` -> `Disable`)。若机器人已在群内且非管理员，关闭后需要先移出机器人再重新拉入，设置才会生效。 |
 
@@ -303,6 +321,7 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot)**�
 > [!WARNING]
 > 1. **性能考虑**: 大量消息分析可能消耗较多 LLM tokens
 > 2. **数据准确性**: 分析结果基于可获取的群聊记录，可能不完全准确
+> 3. **QQ 官方 Bot 数据边界**: 前置插件只能缓存 QQ 官方平台实际推送给 AstrBot 的消息；未下发给机器人的群消息无法参与分析。请确保前置插件的 `retention_days` 不小于本插件的 `analysis_days`。
 
 ## 增量分析模式 (Beta)
 

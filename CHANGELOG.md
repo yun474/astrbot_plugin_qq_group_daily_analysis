@@ -1,5 +1,14 @@
 # 更新日志 (CHANGELOG)
 
+## [v4.10.10] - 🐾 云云增加 QQ 官方 Bot 历史缓存适配
+*   **✨ QQ 官方 Bot 支持**: 新增 `qq_official` 与 `qq_official_webhook` 平台适配器，不再调用官方 Bot 不具备的历史消息接口。
+*   **🗃️ 前置缓存取数**: 直接只读访问 [`yun474/astrbot_plugin_quote_cache`](https://github.com/yun474/astrbot_plugin_quote_cache) 的 `messages.sqlite3`，按平台实例和群聊严格隔离。
+*   **📅 按日分析**: 按原插件 `analysis_days` 读取有效缓存，默认最近 1 天；增量分析仍可用 `since_ts` 指定窗口。
+*   **🔒 保留消息上限**: 完整沿用原插件 `max_messages`，先选择窗口内最新的指定条数，再恢复为时间升序进入原清洗、统计和 LLM 流程。
+*   **🧹 避免机器人套娃**: 读取时排除历史缓存中标记为 Bot 回复的记录；图片等媒体沿用前置插件的文本占位符。
+*   **📨 报告发送兼容**: 手动命令使用当前事件回复，兼容不支持 QQ 官方主动发送的旧版 AstrBot；自动任务优先使用 AstrBot 主动发送并在必要时回退官方文本接口。
+*   **📖 文档补全**: README 增加前置插件、安装地址、数据边界和 QQ 官方 Bot 使用说明。
+
 ## [yun474 fork sync 2026-07-17] - 🐾 云云同步上游更新
 *   **⬆️ 上游同步**: 合并原仓库 v4.10.7 至 v4.10.9 的更新，包括禁言状态检测与缓存、LLM 重试/降级补偿、插件数据目录修复，以及 BlueArchive 模板。
 *   **🖼️ 本地渲染保留**: 完整保留 fork 的 `local_browser`、`local_first`、`astrbot_first` HTML 转图片后端和相关配置。
