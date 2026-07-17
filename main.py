@@ -16,7 +16,7 @@ from astrbot.api import logger as astrbot_logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import PermissionType
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.core.message.components import File
+from astrbot.core.message.components import File, Image
 
 from .src.application.commands.template_command_service import (
     TemplateCommandService,
@@ -630,8 +630,12 @@ class GroupDailyAnalysis(Star):
             adapter = self.bot_manager.get_adapter(platform_id)
             orig_msg_id = getattr(event.message_obj, "message_id", None)
             use_text_reply = self.config_manager.get_enable_analysis_reply()
+            is_qq_official_history = bool(
+                getattr(adapter, "uses_history_cache", False)
+            )
+            show_analysis_prompt = use_text_reply or is_qq_official_history
 
-            if use_text_reply:
+            if show_analysis_prompt:
                 yield event.plain_result("🔍 正在启动分析引擎，正在拉取最近消息...")
             elif adapter and orig_msg_id:
                 await adapter.set_reaction(
@@ -655,7 +659,7 @@ class GroupDailyAnalysis(Star):
                     yield event.plain_result("❌ 分析失败，原因未知")
                 return
 
-            if not use_text_reply and adapter and orig_msg_id:
+            if not show_analysis_prompt and adapter and orig_msg_id:
                 await adapter.set_reaction(
                     event.get_group_id(), orig_msg_id, "analysis_done"
                 )
@@ -719,7 +723,15 @@ class GroupDailyAnalysis(Star):
                 if is_qq_official_history:
                     # QQ 官方 Bot 在旧版 AstrBot 中不支持 send_by_session。
                     # 手动命令直接借当前事件回复，兼容范围最稳。
-                    yield event.image_result(image_url)
+                    if image_url.startswith("base64://"):
+                        image_component = Image.fromBase64(
+                            image_url[len("base64://") :]
+                        )
+                    elif image_url.startswith(("http://", "https://")):
+                        image_component = Image.fromURL(image_url)
+                    else:
+                        image_component = Image.fromFileSystem(image_url)
+                    yield event.chain_result([image_component])
                     if caption:
                         yield event.plain_result(caption)
                     return

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import random
 import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from astrbot.core.message.components import File, Image, Plain
+from astrbot.core.message.components import File, Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
@@ -26,6 +28,7 @@ from ..base import PlatformAdapter
 
 HISTORY_PLUGIN_NAME = "astrbot_plugin_quote_cache"
 HISTORY_DB_FILENAME = "messages.sqlite3"
+QQ_OPEN_PLATFORM_AVATAR_SIZES = (40, 100, 640)
 
 
 class QQOfficialHistoryAdapter(PlatformAdapter):
@@ -49,9 +52,13 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
         configured_ids = self.config.get("bot_self_ids", [])
         if isinstance(configured_ids, list):
             self.bot_self_ids = [str(item) for item in configured_ids if item]
+        self._avatar_appid = self._resolve_avatar_appid()
+        self._avatar_appid_warning_logged = False
 
     def set_context(self, context: Any):
         self._context = context
+        if not self._avatar_appid:
+            self._avatar_appid = self._resolve_avatar_appid()
 
     def _init_capabilities(self) -> PlatformCapabilities:
         return PlatformCapabilities(
@@ -70,10 +77,10 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
             supports_forward_message=False,
             supports_reply_message=False,
             max_text_length=4000,
-            supports_user_avatar=False,
+            supports_user_avatar=True,
             supports_group_avatar=False,
             avatar_needs_api_call=False,
-            avatar_sizes=(100,),
+            avatar_sizes=QQ_OPEN_PLATFORM_AVATAR_SIZES,
         )
 
     @property
@@ -357,21 +364,106 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
         return await self._send_chain(str(group_id), MessageChain([Plain(str(text))]))
 
     @staticmethod
-    def _image_component(image_path: str) -> Image:
+    def _local_image_base64(image_path: str) -> str | None:
         source = str(image_path)
-        if source.startswith(("http://", "https://")):
-            return Image.fromURL(source)
         if source.startswith("base64://"):
-            return Image.fromBase64(source[len("base64://") :])
-        return Image.fromFileSystem(source)
+            return source[len("base64://") :]
+        if source.startswith("data:"):
+            parts = source.split(",", 1)
+            return parts[1] if len(parts) == 2 else None
+        if source.startswith("file:///"):
+            source = source[len("file:///") :]
+        path = Path(source)
+        if not path.is_file():
+            return None
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+
+    async def _send_image_direct(self, group_id: str, image_path: str) -> bool:
+        """Upload and send one QQ group image, checking the real API response."""
+        api = getattr(self.bot, "api", None)
+        post_group_message = getattr(api, "post_group_message", None)
+        if not callable(post_group_message):
+            return False
+
+        source = str(image_path)
+        media = None
+        try:
+            if source.startswith(("http://", "https://")):
+                post_group_file = getattr(api, "post_group_file", None)
+                if not callable(post_group_file):
+                    return False
+                media = await post_group_file(
+                    group_openid=str(group_id),
+                    file_type=1,
+                    url=source,
+                    srv_send_msg=False,
+                )
+            else:
+                image_base64 = self._local_image_base64(source)
+                http = getattr(api, "_http", None)
+                request = getattr(http, "request", None)
+                if not image_base64 or not callable(request):
+                    return False
+
+                from botpy.http import Route
+
+                route = Route(
+                    "POST",
+                    "/v2/groups/{group_openid}/files",
+                    group_openid=str(group_id),
+                )
+                media = await request(
+                    route,
+                    json={
+                        "file_data": image_base64,
+                        "file_type": 1,
+                        "srv_send_msg": False,
+                    },
+                )
+
+            if media is None:
+                logger.warning(
+                    "[QQOfficialHistory] QQ 图片上传接口返回空结果: group=%s",
+                    group_id,
+                )
+                return False
+
+            result = await post_group_message(
+                group_openid=str(group_id),
+                msg_type=7,
+                content=None,
+                media=media,
+                msg_seq=random.randint(1, 10000),
+            )
+            if result is None:
+                logger.warning(
+                    "[QQOfficialHistory] QQ 图片消息接口返回空结果: group=%s",
+                    group_id,
+                )
+                return False
+            return True
+        except Exception:
+            logger.exception(
+                "[QQOfficialHistory] QQ 官方主动图片发送失败: group=%s",
+                group_id,
+            )
+            return False
 
     async def send_image(
         self, group_id: str, image_path: str, caption: str = ""
     ) -> bool:
-        chain = [self._image_component(image_path)]
-        if caption:
-            chain.append(Plain(str(caption)))
-        return await self._send_chain(str(group_id), MessageChain(chain))
+        target_group = str(group_id)
+        sent = await self._send_image_direct(target_group, image_path)
+        if not sent:
+            return False
+
+        # QQ 富媒体与文字分开发，避免 caption 影响图片消息校验。
+        if caption and not await self.send_text(target_group, str(caption)):
+            logger.warning(
+                "[QQOfficialHistory] 图片已发送，但说明文字发送失败: group=%s",
+                group_id,
+            )
+        return True
 
     async def send_file(
         self, group_id: str, file_path: str, filename: str | None = None
@@ -382,8 +474,87 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
             MessageChain([File(name=name, file=str(file_path))]),
         )
 
-    async def get_user_avatar_url(self, user_id: str, size: int = 100) -> str | None:
+    @staticmethod
+    def _read_appid(candidate: Any) -> str | None:
+        """Read an AppID from an object or mapping without exposing credentials."""
+        if candidate is None:
+            return None
+        if isinstance(candidate, dict):
+            for key in ("appid", "app_id"):
+                value = candidate.get(key)
+                if value:
+                    return str(value).strip() or None
+            return None
+        for attr in ("appid", "app_id"):
+            value = getattr(candidate, attr, None)
+            if value:
+                return str(value).strip() or None
         return None
+
+    def _resolve_avatar_appid(self) -> str | None:
+        configured = self._read_appid(self.config)
+        if configured:
+            return configured
+
+        direct = self._read_appid(self.bot)
+        if direct:
+            return direct
+
+        # qq-botpy 1.x keeps the login AppID on BotHttp._token.
+        for owner in (self.bot, getattr(self.bot, "api", None)):
+            http = getattr(owner, "http", None) or getattr(owner, "_http", None)
+            token_appid = self._read_appid(getattr(http, "_token", None))
+            if token_appid:
+                return token_appid
+
+        manager = getattr(self._context, "platform_manager", None)
+        platforms = getattr(manager, "platform_insts", None)
+        if platforms is None:
+            get_insts = getattr(manager, "get_insts", None)
+            platforms = get_insts() if callable(get_insts) else []
+        for platform in list(platforms or []):
+            try:
+                metadata = platform.meta()
+                platform_id = str(getattr(metadata, "id", "") or "")
+            except Exception:
+                continue
+            if platform_id != self.platform_id:
+                continue
+            platform_appid = self._read_appid(platform)
+            if platform_appid:
+                return platform_appid
+        return None
+
+    @staticmethod
+    def _avatar_size(size: int) -> int:
+        try:
+            requested = max(1, int(size))
+        except (TypeError, ValueError):
+            requested = 100
+        return min(
+            QQ_OPEN_PLATFORM_AVATAR_SIZES,
+            key=lambda available: abs(available - requested),
+        )
+
+    async def get_user_avatar_url(self, user_id: str, size: int = 100) -> str | None:
+        openid = str(user_id or "").strip()
+        if not openid:
+            return None
+
+        if not self._avatar_appid:
+            self._avatar_appid = self._resolve_avatar_appid()
+        if not self._avatar_appid:
+            if not self._avatar_appid_warning_logged:
+                logger.warning(
+                    "[QQOfficialHistory] 无法读取 QQ 开放平台 AppID，暂时不能拼接用户头像 URL"
+                )
+                self._avatar_appid_warning_logged = True
+            return None
+
+        avatar_size = self._avatar_size(size)
+        appid = quote(self._avatar_appid, safe="")
+        encoded_openid = quote(openid, safe="")
+        return f"https://q.qlogo.cn/qqapp/{appid}/{encoded_openid}/{avatar_size}"
 
     async def get_user_avatar_data(self, user_id: str, size: int = 100) -> str | None:
         return None
@@ -394,4 +565,7 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
     async def batch_get_avatar_urls(
         self, user_ids: list[str], size: int = 100
     ) -> dict[str, str | None]:
-        return {str(user_id): None for user_id in user_ids}
+        return {
+            str(user_id): await self.get_user_avatar_url(str(user_id), size)
+            for user_id in user_ids
+        }
