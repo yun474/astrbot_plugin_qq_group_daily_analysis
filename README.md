@@ -2,7 +2,7 @@
 
 # 群聊日常分析插件
 
-[![Plugin Version](https://img.shields.io/badge/Latest_Version-v4.10.10-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/yun474/astrbot_plugin_qq_group_daily_analysis)
+[![Plugin Version](https://img.shields.io/badge/Latest_Version-v4.10.11-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/yun474/astrbot_plugin_qq_group_daily_analysis)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-ff69b4?style=for-the-badge)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis) 
@@ -98,6 +98,8 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 > - 前置插件：[`yun474/astrbot_plugin_quote_cache`](https://github.com/yun474/astrbot_plugin_quote_cache)
 > - 安装地址：`https://github.com/yun474/astrbot_plugin_quote_cache`
 > - 建议版本：`v1.0.0` 或更高
+>
+> 安装前置插件后，请进入本插件配置的 **基础设置**，开启 **“启用 QQ 官方 Bot 历史缓存模式”**（配置键：`basic.qq_official_mode`）。此开关默认关闭；不开启时，本插件不会为 QQ 官方 Bot 创建分析适配器，也不会在定时任务中扫描官方 Bot 缓存。
 >
 > 两个插件必须运行在同一个 AstrBot 实例、共享同一个 `data` 目录。群分析插件会以只读方式打开：
 >
@@ -310,7 +312,7 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 | 平台 | 适配器类型 | 特殊要求/说明 |
 |------|-----------|--------------|
 | **QQ** | OneBot v11 | 建议使用 NapCat/Lagrange。需注意消息分页拉取限制。 |
-| **QQ 官方 Bot** | `qq_official` / `qq_official_webhook` | 必须先安装[历史消息搜索插件](https://github.com/yun474/astrbot_plugin_quote_cache)。只分析平台实际推送并成功缓存的消息，仍受 `max_messages` 限制。 |
+| **QQ 官方 Bot** | `qq_official` / `qq_official_webhook` | 必须先安装[历史消息搜索插件](https://github.com/yun474/astrbot_plugin_quote_cache)，并开启 `basic.qq_official_mode`。只分析平台实际推送并成功缓存的消息，仍受 `max_messages` 限制。 |
 | **Discord** | Discord | **必须** 拥有 `Read Message History` (查看消息历史记录) 权限。 |
 | **Telegram** | Telegram Bot API | 若机器人不是群管理员，入群前需先在 BotFather 关闭隐私模式 (`/setprivacy` -> `Disable`)。若机器人已在群内且非管理员，关闭后需要先移出机器人再重新拉入，设置才会生效。 |
 

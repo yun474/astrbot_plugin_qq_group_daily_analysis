@@ -1,5 +1,11 @@
 # 更新日志 (CHANGELOG)
 
+## [v4.10.11] - 🐾 云云补上 QQ 官方 Bot 模式开关
+*   **⚙️ 显式开关**: 基础设置新增 `qq_official_mode`，默认关闭；只有开启后才会创建 QQ 官方 Bot / Webhook 历史缓存适配器。
+*   **⏰ 定时任务联动**: 关闭开关时，自动分析不会扫描官方 Bot 的缓存群列表；运行中关闭开关也会停止返回已有缓存适配器。
+*   **💬 清晰提示**: 在官方 Bot 群里手动执行 `/群分析` 却未开启模式时，会直接提示去基础设置开启，不再只报“未找到平台”。
+*   **📖 文档更新**: README 补充配置项名称、默认状态与启用步骤。
+
 ## [v4.10.10] - 🐾 云云增加 QQ 官方 Bot 历史缓存适配
 *   **✨ QQ 官方 Bot 支持**: 新增 `qq_official` 与 `qq_official_webhook` 平台适配器，不再调用官方 Bot 不具备的历史消息接口。
 *   **🗃️ 前置缓存取数**: 直接只读访问 [`yun474/astrbot_plugin_quote_cache`](https://github.com/yun474/astrbot_plugin_quote_cache) 的 `messages.sqlite3`，按平台实例和群聊严格隔离。

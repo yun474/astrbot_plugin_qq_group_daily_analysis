@@ -55,6 +55,26 @@ class BotManager:
             platform_id = self._get_platform_id_from_instance(bot_instance)
 
         if bot_instance and platform_id:
+            if platform_name is None:
+                platform_name = self._detect_platform_name(bot_instance)
+
+            normalized_platform_name = str(platform_name or "").lower()
+            if (
+                normalized_platform_name
+                in {
+                    "qq_official",
+                    "qq_official_webhook",
+                }
+                and not self.config_manager.get_qq_official_mode()
+            ):
+                self._bot_instances[platform_id] = bot_instance
+                self._adapters.pop(platform_id, None)
+                logger.info(
+                    "QQ 官方 Bot 历史缓存模式未开启，跳过平台 %s 的群分析适配器",
+                    platform_id,
+                )
+                return
+
             # 如果 bot_instance 没变，且已经有适配器，跳过重新创建，防止丢失内部状态（如缓存等）
             old_instance = self._bot_instances.get(platform_id)
             if bot_instance is old_instance and platform_id in self._adapters:
@@ -66,14 +86,12 @@ class BotManager:
             self._bot_instances[platform_id] = bot_instance
 
             # 为 DDD 集成创建 PlatformAdapter
-            if platform_name is None:
-                platform_name = self._detect_platform_name(bot_instance)
-
             if platform_name and PlatformAdapterFactory.is_supported(platform_name):
                 adapter_config = {
                     "bot_self_ids": self._bot_self_ids.copy(),
                     "platform_id": str(platform_id),
                     "plugin_instance": self._plugin_instance,
+                    "qq_official_mode": self.config_manager.get_qq_official_mode(),
                 }
                 adapter = PlatformAdapterFactory.create(
                     platform_name, bot_instance, adapter_config
@@ -279,6 +297,8 @@ class BotManager:
 
         这是 DDD 架构操作的主要方法。
         """
+        self._prune_disabled_qq_official_adapters()
+
         if platform_id:
             # 无论是否存在适配器，都尝试检测一次 client 是否有变（如重启后 session 变化）
             if platform_id in self._platforms:
@@ -305,12 +325,26 @@ class BotManager:
 
         return None
 
+    def _prune_disabled_qq_official_adapters(self):
+        """开关关闭后立即移除已创建的官方 Bot 缓存适配器。"""
+        if self.config_manager.get_qq_official_mode():
+            return
+        disabled_ids = [
+            platform_id
+            for platform_id, adapter in self._adapters.items()
+            if getattr(adapter, "uses_history_cache", False)
+        ]
+        for platform_id in disabled_ids:
+            self._adapters.pop(platform_id, None)
+
     def get_all_adapters(self) -> dict:
         """获取所有 PlatformAdapter 实例 {platform_id: adapter}"""
+        self._prune_disabled_qq_official_adapters()
         return self._adapters.copy()
 
     def has_adapter(self, platform_id: str | None = None) -> bool:
         """检查指定平台是否有适配器"""
+        self._prune_disabled_qq_official_adapters()
         if platform_id:
             return platform_id in self._adapters
         return bool(self._adapters)
@@ -460,6 +494,7 @@ class BotManager:
 
     def get_status_info(self) -> dict[str, object]:
         """获取bot管理器状态信息"""
+        self._prune_disabled_qq_official_adapters()
         adapter_info = {}
         for pid, adapter in self._adapters.items():
             caps = adapter.get_capabilities()

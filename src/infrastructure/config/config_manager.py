@@ -114,6 +114,10 @@ class ConfigManager:
         """获取最大消息数量"""
         return self._get_group("basic").get("max_messages", 1000)
 
+    def get_qq_official_mode(self) -> bool:
+        """是否启用 QQ 官方 Bot 历史缓存适配模式。"""
+        return bool(self._get_group("basic").get("qq_official_mode", False))
+
     def get_analysis_days(self) -> int:
         """获取分析天数"""
         return self._get_group("basic").get("analysis_days", 1)

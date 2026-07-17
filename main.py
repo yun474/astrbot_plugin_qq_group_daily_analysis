@@ -574,6 +574,25 @@ class GroupDailyAnalysis(Star):
                 yield event.plain_result("❌ 请在群聊中使用此命令")
                 return
 
+            platform_name = ""
+            if hasattr(event, "get_platform_name"):
+                try:
+                    platform_name = str(event.get_platform_name() or "").lower()
+                except Exception:
+                    platform_name = ""
+            if (
+                platform_name
+                in {
+                    "qq_official",
+                    "qq_official_webhook",
+                }
+                and not self.config_manager.get_qq_official_mode()
+            ):
+                yield event.plain_result(
+                    "❌ QQ 官方 Bot 历史缓存模式尚未开启，请在插件配置的“基础设置”中开启后再试"
+                )
+                return
+
             # 更新bot实例
             self.bot_manager.update_from_event(event)
 

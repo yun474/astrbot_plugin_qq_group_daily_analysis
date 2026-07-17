@@ -36,6 +36,8 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
 
     def __init__(self, bot_instance: Any, config: dict | None = None):
         super().__init__(bot_instance, config)
+        if not bool(self.config.get("qq_official_mode", False)):
+            raise RuntimeError("QQ 官方 Bot 历史缓存模式未开启")
         self.platform_id = str(self.config.get("platform_id") or "qq_official")
         self._context: Any | None = None
         self._history_db_path = (

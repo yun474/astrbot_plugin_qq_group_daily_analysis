@@ -847,12 +847,26 @@ class AutoScheduler:
                 if not adapter:
                     platform_name = self.bot_manager._detect_platform_name(bot_instance)
                     if platform_name:
+                        if (
+                            platform_name.lower()
+                            in {
+                                "qq_official",
+                                "qq_official_webhook",
+                            }
+                            and not self.config_manager.get_qq_official_mode()
+                        ):
+                            logger.debug(
+                                "QQ 官方 Bot 历史缓存模式未开启，跳过平台 %s",
+                                platform_id,
+                            )
+                            continue
                         adapter = PlatformAdapterFactory.create(
                             platform_name,
                             bot_instance,
                             config={
                                 "bot_self_ids": self.config_manager.get_bot_self_ids(),
                                 "platform_id": str(platform_id),
+                                "qq_official_mode": self.config_manager.get_qq_official_mode(),
                             },
                         )
 

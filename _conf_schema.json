@@ -24,6 +24,12 @@
                     "type": "string"
                 }
             },
+            "qq_official_mode": {
+                "type": "bool",
+                "description": "启用 QQ 官方 Bot 历史缓存模式",
+                "default": false,
+                "hint": "仅使用 QQ 官方 Bot / Webhook 时开启。开启后，群分析会从前置插件 astrbot_plugin_quote_cache 的 SQLite 缓存读取历史消息；关闭时不会创建官方 Bot 分析适配器，定时任务也不会扫描官方 Bot 缓存。"
+            },
             "analysis_days": {
                 "type": "int",
                 "description": "默认分析天数",
