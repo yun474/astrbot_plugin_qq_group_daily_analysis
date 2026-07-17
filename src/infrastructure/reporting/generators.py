@@ -711,6 +711,43 @@ class ReportGenerator(IReportGenerator):
         avatar_reuse_aliases: dict[str, str] = {}
 
         for i, topic in enumerate(topics[:max_topics], 1):
+            contributor_names: list[str] = []
+            contributor_ids = [
+                str(user_id).strip()
+                for user_id in getattr(topic, "contributor_ids", [])
+                if str(user_id).strip()
+            ]
+            stored_names = [str(name).strip() for name in topic.contributors if name]
+
+            if contributor_ids:
+                for index, user_id in enumerate(contributor_ids):
+                    fallback_name = (
+                        stored_names[index] if index < len(stored_names) else None
+                    )
+                    contributor_names.append(
+                        await self._resolve_user_display_name(
+                            user_id,
+                            nickname_getter,
+                            user_analysis,
+                            fallback_name=fallback_name,
+                        )
+                    )
+            else:
+                known_user_ids = {
+                    str(user_id).strip()
+                    for user_id in (user_analysis or {})
+                    if str(user_id).strip()
+                }
+                for stored_name in stored_names:
+                    if stored_name in known_user_ids:
+                        contributor_names.append(
+                            await self._resolve_user_display_name(
+                                stored_name, nickname_getter, user_analysis
+                            )
+                        )
+                    else:
+                        contributor_names.append(stored_name)
+
             # 处理话题详情中的用户引用头像
             processed_detail = await self._render_mentions(
                 topic.detail,
@@ -725,7 +762,7 @@ class ReportGenerator(IReportGenerator):
                 {
                     "index": i,
                     "topic": topic,
-                    "contributors": "、".join(topic.contributors),
+                    "contributors": "、".join(contributor_names),
                     "detail": processed_detail,
                 }
             )
@@ -910,12 +947,28 @@ class ReportGenerator(IReportGenerator):
         avatar_reuse_aliases: dict[str, str] | None = None,
     ) -> Markup:
         """
-        处理文本，将 [123456] 格式的用户引用替换为头像+名称的胶囊样式
+        处理文本，将 [用户ID] 格式的引用替换为头像+名称的胶囊样式。
+
+        用户 ID 是跨平台不透明字符串。仅匹配 user_analysis 中真实存在的
+        用户，避免把 [图片] 等普通占位文本误识别为用户引用。
         """
-        pattern = r"\[(\d+)\]"
         if not text:
             return Markup("")
 
+        known_user_ids = {
+            str(user_id).strip()
+            for user_id in (user_analysis or {})
+            if str(user_id).strip()
+        }
+        if not known_user_ids:
+            return self._escape_text_segment(text)
+
+        escaped_ids = sorted(
+            (re.escape(user_id) for user_id in known_user_ids),
+            key=len,
+            reverse=True,
+        )
+        pattern = rf"\[({'|'.join(escaped_ids)})\]"
         matches = list(re.finditer(pattern, text))
         if not matches:
             return self._escape_text_segment(text)
@@ -925,23 +978,9 @@ class ReportGenerator(IReportGenerator):
             url = await self._get_user_avatar(
                 uid, avatar_url_getter, avatar_cache_namespace
             )  # 内部已有缓存，无需顶层并发获取
-
-            name = None
-            # 1. 尝试从 LLM 分析结果获取
-            if user_analysis and uid in user_analysis:
-                stats = user_analysis[uid]
-                name = stats.get("nickname") or stats.get("name")
-                if self._is_placeholder_display_name(name, uid):
-                    name = None
-
-            # 2. 尝试通过回调获取实时昵称
-            if not name and nickname_getter:
-                try:
-                    name = await nickname_getter(uid)
-                    if self._is_placeholder_display_name(name, uid):
-                        name = None
-                except Exception as e:
-                    logger.warning(f"获取昵称失败 {uid}: {e}")
+            final_name = await self._resolve_user_display_name(
+                uid, nickname_getter, user_analysis
+            )
 
             # 胶囊样式 (Capsule Style) - 统一使用
             capsule_style = (
@@ -952,13 +991,8 @@ class ReportGenerator(IReportGenerator):
             img_style = "width:18px;height:18px;border-radius:50%;margin-right:4px;display:block;"
             name_style = "font-size:0.85em;color:inherit;font-weight:500;line-height:1;"
 
-            # 3. 最终后备: 确保有头像和名称
+            # 最终后备: 确保有头像和名称
             final_url = url if url else self._get_default_avatar_base64()
-            final_name = (
-                name
-                if (name and not self._is_placeholder_display_name(name, uid))
-                else str(uid)
-            )
 
             avatar_ref = self._register_reusable_avatar(
                 final_url,
@@ -1011,6 +1045,47 @@ class ReportGenerator(IReportGenerator):
         if normalized.lower() in {"unknown", "none", "null", "nil", "undefined"}:
             return True
         return normalized == str(user_id).strip()
+
+    async def _resolve_user_display_name(
+        self,
+        user_id: str,
+        nickname_getter=None,
+        user_analysis: dict | None = None,
+        fallback_name: str | None = None,
+    ) -> str:
+        """从已有统计或平台回调解析昵称，最终回退为短 ID。"""
+        normalized_id = str(user_id).strip()
+        name = None
+
+        if user_analysis and normalized_id in user_analysis:
+            stats = user_analysis[normalized_id]
+            if isinstance(stats, dict):
+                name = stats.get("nickname") or stats.get("name")
+                if self._is_placeholder_display_name(name, normalized_id):
+                    name = None
+
+        if not name and not self._is_placeholder_display_name(
+            fallback_name, normalized_id
+        ):
+            name = str(fallback_name).strip()
+
+        if not name and nickname_getter:
+            try:
+                name = await nickname_getter(normalized_id)
+                if self._is_placeholder_display_name(name, normalized_id):
+                    name = None
+            except Exception as e:
+                logger.warning(f"获取昵称失败 {normalized_id}: {e}")
+
+        return str(name).strip() if name else self._shorten_user_id(normalized_id)
+
+    @staticmethod
+    def _shorten_user_id(user_id: str) -> str:
+        """缩短无昵称的平台用户 ID，数字 QQ 号仍保持完整。"""
+        normalized = str(user_id).strip()
+        if len(normalized) <= 12:
+            return normalized
+        return f"{normalized[:6]}…{normalized[-4:]}"
 
     @staticmethod
     def _safe_url_for_log(url: str | None) -> str:

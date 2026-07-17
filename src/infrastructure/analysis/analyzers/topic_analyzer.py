@@ -42,6 +42,41 @@ class TopicAnalyzer(BaseAnalyzer[SummaryTopic, list[dict]]):
     def get_response_schema(self) -> JSONObject:
         return build_topics_schema(self.get_max_count())
 
+    @staticmethod
+    def _shorten_user_id(user_id: str) -> str:
+        """为没有昵称的平台用户生成不刺眼的短 ID。"""
+        normalized = str(user_id).strip()
+        if len(normalized) <= 12:
+            return normalized
+        return f"{normalized[:6]}…{normalized[-4:]}"
+
+    @classmethod
+    def _resolve_contributors(
+        cls,
+        raw_ids: list[str],
+        id_to_nickname: dict[str, str],
+        bot_ids: set[str],
+    ) -> tuple[list[str], list[str]]:
+        """校验 LLM 返回的贡献者 ID，并转换成可读的展示名。"""
+        allowed_ids = set(id_to_nickname) | bot_ids
+        valid_ids: list[str] = []
+        for raw_id in raw_ids:
+            user_id = str(raw_id).strip()
+            if user_id and user_id in allowed_ids and user_id not in valid_ids:
+                valid_ids.append(user_id)
+
+        resolved_names: list[str] = []
+        for user_id in valid_ids:
+            nickname = str(id_to_nickname.get(user_id) or "").strip()
+            if nickname and nickname != user_id:
+                resolved_names.append(nickname)
+            elif user_id in bot_ids:
+                resolved_names.append("Bot")
+            else:
+                resolved_names.append(cls._shorten_user_id(user_id))
+
+        return valid_ids, resolved_names
+
     def build_prompt(self, data: list[dict]) -> str:
         """
         构建话题分析提示词
@@ -348,12 +383,18 @@ class TopicAnalyzer(BaseAnalyzer[SummaryTopic, list[dict]]):
                 logger.debug(f"第一条文本消息内容: {text_messages[0]}")
 
             # 建立 ID 到昵称的映射表
-            id_to_nickname = {}
+            id_to_nickname: dict[str, str] = {}
             for msg in text_messages:
-                sender = msg.get("sender")
-                user_id = msg.get("user_id")
-                if sender and user_id:
+                sender = str(msg.get("sender") or "").strip()
+                user_id = str(msg.get("user_id") or "").strip()
+                if user_id:
                     id_to_nickname[user_id] = sender
+
+            bot_ids = {
+                str(user_id).strip()
+                for user_id in self.config_manager.get_bot_self_ids()
+                if str(user_id).strip()
+            }
 
             # 直接传入原始消息，让 build_prompt 方法处理
             topics, usage = await self.analyze(messages, umo, session_id)
@@ -362,27 +403,12 @@ class TopicAnalyzer(BaseAnalyzer[SummaryTopic, list[dict]]):
             for topic in topics:
                 raw_ids = topic.contributors  # LLM 返回的是 ID 列表
 
-                # 填充 contributor_ids
-                # 过滤掉非数字的脏数据 (LLM 偶尔会发疯)
-                valid_ids = [
-                    str(uid).strip() for uid in raw_ids if str(uid).strip().isdigit()
-                ]
+                # 用户 ID 是平台不透明标识，不能假定为纯数字。只接受本批消息中
+                # 实际出现过的 ID（以及已配置的 Bot ID），避免把 LLM 幻觉当用户。
+                valid_ids, resolved_names = self._resolve_contributors(
+                    raw_ids, id_to_nickname, bot_ids
+                )
                 topic.contributor_ids = valid_ids
-
-                # 映射回昵称用于显示
-                resolved_names = []
-                for uid in valid_ids:
-                    # 尝试从当前批次消息映射
-                    name = id_to_nickname.get(uid)
-                    if not name:
-                        # 尝试去全局配置里找 (e.g. 机器人自己)
-                        bot_ids = self.config_manager.get_bot_self_ids()
-                        if uid in bot_ids:
-                            name = "Bot"
-                        else:
-                            name = uid  # Fallback to ID
-                    resolved_names.append(name)
-
                 topic.contributors = resolved_names
 
             return topics, usage
