@@ -106,7 +106,47 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
     def _scope_key(self, group_id: str) -> str:
         return f"{self.platform_id}|group:{group_id}"
 
-    def _row_to_message(self, row: sqlite3.Row, group_id: str) -> UnifiedMessage | None:
+    @staticmethod
+    def _is_placeholder_sender_name(
+        sender_name: str | None, sender_id: str | None
+    ) -> bool:
+        """判断缓存中的昵称是否只是空值或用户 ID 占位。"""
+        normalized_name = str(sender_name or "").strip()
+        normalized_id = str(sender_id or "").strip()
+        if not normalized_name:
+            return True
+        if normalized_name.lower() in {
+            "unknown",
+            "none",
+            "null",
+            "nil",
+            "undefined",
+            "未知用户",
+        }:
+            return True
+        return bool(normalized_id and normalized_name == normalized_id)
+
+    @classmethod
+    def _build_sender_name_cache(cls, rows: list[sqlite3.Row]) -> dict[str, str]:
+        """从按时间倒序的缓存行中提取每个用户最新的有效昵称。"""
+        sender_names: dict[str, str] = {}
+        for row in rows:
+            sender_id = str(row["sender_id"] or "").strip()
+            sender_name = str(row["sender_name"] or "").strip()
+            if (
+                sender_id
+                and sender_id not in sender_names
+                and not cls._is_placeholder_sender_name(sender_name, sender_id)
+            ):
+                sender_names[sender_id] = sender_name
+        return sender_names
+
+    def _row_to_message(
+        self,
+        row: sqlite3.Row,
+        group_id: str,
+        sender_name_cache: dict[str, str] | None = None,
+    ) -> UnifiedMessage | None:
         content = str(row["content"] or "").strip()
         if not content:
             return None
@@ -116,8 +156,12 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
             or row["original_message_id"]
             or f"history-cache:{row['id']}"
         )
-        sender_id = str(row["sender_id"] or "")
-        sender_name = str(row["sender_name"] or sender_id or "未知用户")
+        sender_id = str(row["sender_id"] or "").strip()
+        sender_name = str(row["sender_name"] or "").strip()
+        if self._is_placeholder_sender_name(sender_name, sender_id):
+            sender_name = str((sender_name_cache or {}).get(sender_id) or "").strip()
+        if self._is_placeholder_sender_name(sender_name, sender_id):
+            sender_name = sender_id or "未知用户"
         contents = (MessageContent(type=MessageContentType.TEXT, text=content),)
         return UnifiedMessage(
             message_id=message_id,
@@ -181,6 +225,26 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
                     + " ORDER BY timestamp DESC, id DESC LIMIT ?",
                     (*params, max_count),
                 ).fetchall()
+
+                sender_ids = {
+                    str(row["sender_id"] or "").strip()
+                    for row in rows
+                    if str(row["sender_id"] or "").strip()
+                }
+                sender_name_rows: list[sqlite3.Row] = []
+                if sender_ids:
+                    placeholders = ",".join("?" for _ in sender_ids)
+                    sender_name_rows = db.execute(
+                        "SELECT sender_id, sender_name FROM messages WHERE "
+                        "scope_key=? AND expires_at>? AND sender_id IN ("
+                        + placeholders
+                        + ") ORDER BY timestamp DESC, id DESC",
+                        (
+                            self._scope_key(str(group_id)),
+                            now,
+                            *sorted(sender_ids),
+                        ),
+                    ).fetchall()
         except FileNotFoundError as exc:
             logger.error("[QQOfficialHistory] %s", exc)
             return []
@@ -192,10 +256,13 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
             )
             return []
 
+        sender_name_cache = self._build_sender_name_cache(sender_name_rows)
         messages: list[UnifiedMessage] = []
         seen_ids: set[str] = set()
         for row in reversed(rows):
-            message = self._row_to_message(row, str(group_id))
+            message = self._row_to_message(
+                row, str(group_id), sender_name_cache=sender_name_cache
+            )
             if not message or message.message_id in seen_ids:
                 continue
             messages.append(message)
@@ -256,44 +323,50 @@ class QQOfficialHistoryAdapter(PlatformAdapter):
         try:
             with closing(self._connect_readonly()) as db:
                 rows = db.execute(
-                    """SELECT sender_id, MAX(sender_name) AS sender_name
+                    """SELECT sender_id, sender_name
                     FROM messages WHERE scope_key=? AND expires_at>? AND is_bot=0
-                    AND sender_id<>'' GROUP BY sender_id ORDER BY sender_id""",
+                    AND sender_id<>'' ORDER BY timestamp DESC, id DESC""",
                     (self._scope_key(str(group_id)), int(time.time())),
                 ).fetchall()
         except (FileNotFoundError, sqlite3.Error) as exc:
             logger.warning("[QQOfficialHistory] 读取成员列表失败: %s", exc)
             return []
-        return [
-            UnifiedMember(
-                user_id=str(row["sender_id"]),
-                nickname=str(row["sender_name"] or row["sender_id"]),
+        names = self._build_sender_name_cache(rows)
+        members: dict[str, UnifiedMember] = {}
+        for row in rows:
+            sender_id = str(row["sender_id"] or "").strip()
+            if not sender_id or sender_id in members:
+                continue
+            members[sender_id] = UnifiedMember(
+                user_id=sender_id,
+                nickname=names.get(sender_id, sender_id),
             )
-            for row in rows
-        ]
+        return sorted(members.values(), key=lambda member: member.user_id)
 
     async def get_member_info(
         self, group_id: str, user_id: str
     ) -> UnifiedMember | None:
         try:
             with closing(self._connect_readonly()) as db:
-                row = db.execute(
+                rows = db.execute(
                     """SELECT sender_id, sender_name FROM messages
                     WHERE scope_key=? AND sender_id=? AND expires_at>?
-                    ORDER BY timestamp DESC, id DESC LIMIT 1""",
+                    ORDER BY timestamp DESC, id DESC""",
                     (
                         self._scope_key(str(group_id)),
                         str(user_id),
                         int(time.time()),
                     ),
-                ).fetchone()
+                ).fetchall()
         except (FileNotFoundError, sqlite3.Error):
             return None
-        if not row:
+        if not rows:
             return None
+        sender_id = str(rows[0]["sender_id"] or "").strip()
+        sender_name = self._build_sender_name_cache(rows).get(sender_id, sender_id)
         return UnifiedMember(
-            user_id=str(row["sender_id"]),
-            nickname=str(row["sender_name"] or row["sender_id"]),
+            user_id=sender_id,
+            nickname=sender_name,
         )
 
     def _session(self, group_id: str) -> str:
