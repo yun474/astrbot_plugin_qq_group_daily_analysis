@@ -143,6 +143,8 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 > - `astrbot_first`：优先 AstrBot T2I，失败后回退本地截图。
 >
 > Docker 容器内通常需要保持 `本地 Chromium 禁用沙箱` 开启；本地渲染会占用更多 CPU/内存，建议 `最大T2I渲染并发数` 保持为 `1`。
+>
+> 初音未来（HatsuneMiku）的 6 张装饰图随插件保存在 `assets/HatsuneMiku/`，渲染时直接嵌入 HTML；本地截图、AstrBot T2I 和 HTML 报告均无需访问这批图片的图床。字体、图标脚本和其他外部图片仍可能需要网络。已生成的旧报告需要重新生成才会采用本地图片。
 > 
 > ### 3. 使用备用 T2I 服务或自部署
 > <details>

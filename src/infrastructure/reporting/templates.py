@@ -4,12 +4,29 @@ HTML模板模块
 """
 
 import asyncio
+import base64
+import mimetypes
 import os
 import threading
+from functools import lru_cache
+from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from ...utils.logger import logger
+
+
+@lru_cache(maxsize=32)
+def local_image(relative_path: str) -> str:
+    """将插件自带图片内联到 HTML，供本地截图、远程 T2I 和 HTML 报告共用。"""
+    assets_dir = Path(__file__).resolve().parents[3] / "assets"
+    image_path = (assets_dir / relative_path).resolve()
+    image_path.relative_to(assets_dir)
+    mime_type, _ = mimetypes.guess_type(image_path.name)
+    if not mime_type or not mime_type.startswith("image/"):
+        raise ValueError(f"不是图片资源: {relative_path}")
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 class HTMLTemplates:
@@ -45,6 +62,7 @@ class HTMLTemplates:
             trim_blocks=True,
             lstrip_blocks=True,
         )
+        env.globals["local_image"] = local_image
 
         # 使用双重检查锁定，避免在高并发下重复创建相同 template_name 的 env
         with self._env_lock:
