@@ -16,12 +16,17 @@ DEVICE_SCALE_FACTORS = {
 class LocalBrowserRenderer:
     """Render report HTML to an image with a local Playwright browser."""
 
+    IDLE_TIMEOUT = 120
+    """Seconds without renders before Chromium exits to free memory."""
+
     def __init__(self, config_manager: Any, data_dir: str | Path):
         self.config_manager = config_manager
         self.data_dir = Path(data_dir)
         self._playwright = None
         self._browser = None
         self._launch_lock = asyncio.Lock()
+        self._active = 0
+        self._idle_task: asyncio.Task | None = None
 
     async def render(
         self,
@@ -29,6 +34,20 @@ class LocalBrowserRenderer:
         data: dict | None = None,
         return_url: bool = False,
         image_options: dict | None = None,
+    ) -> bytes | str:
+        self._active += 1
+        if self._idle_task:
+            self._idle_task.cancel()
+            self._idle_task = None
+        try:
+            return await self._render(html_content, return_url, image_options)
+        finally:
+            self._active -= 1
+            if not self._active and self._browser:
+                self._idle_task = asyncio.create_task(self._close_when_idle())
+
+    async def _render(
+        self, html_content: str, return_url: bool, image_options: dict | None
     ) -> bytes | str:
         if not html_content:
             raise ValueError("local browser render received empty HTML")
@@ -88,7 +107,24 @@ class LocalBrowserRenderer:
             if context:
                 await context.close()
 
+    async def _close_when_idle(self):
+        await asyncio.sleep(self.IDLE_TIMEOUT)
+        async with self._launch_lock:
+            if self._active:
+                return
+            # Once shutdown starts, new renders wait for the lock and relaunch.
+            self._idle_task = None
+            await self._shutdown()
+        logger.info("[LocalBrowserT2I] Chromium closed after being idle")
+
     async def close(self):
+        if self._idle_task:
+            self._idle_task.cancel()
+            self._idle_task = None
+        async with self._launch_lock:
+            await self._shutdown()
+
+    async def _shutdown(self):
         browser = self._browser
         playwright = self._playwright
         self._browser = None

@@ -339,16 +339,16 @@ class GroupDailyAnalysis(Star):
                     pass
                 self._background_tasks.clear()
 
-            # 2. 停止各个组件 (顺序：先调度器，后底层服务)
+            # 2. 停止各个组件 (先关最占内存的浏览器，后面出错也不会留下 Chromium)
+            if self.local_browser_renderer:
+                await self.local_browser_renderer.close()
+
             if self.auto_scheduler:
                 logger.debug("正在停止自动调度器...")
                 self.auto_scheduler.unschedule_jobs(self.context)
 
             if self.template_preview_router:
                 await self.template_preview_router.unregister_handlers()
-
-            if self.local_browser_renderer:
-                await self.local_browser_renderer.close()
 
             if self.report_generator:
                 await self.report_generator.close()
