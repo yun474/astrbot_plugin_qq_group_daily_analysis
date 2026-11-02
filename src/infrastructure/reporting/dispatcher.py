@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from ...shared.constants import PLUGIN_NAME
+from ...shared.task_context import set_stage
 from ...shared.trace_context import TraceContext
 from ...utils.logger import logger
 
@@ -94,6 +95,7 @@ class ReportDispatcher:
             # image_url and html_content remain None
 
         # 4. 发送图片
+        set_stage("发送报告")
         sent = False
         if image_url:
             caption = TraceContext.make_report_caption()

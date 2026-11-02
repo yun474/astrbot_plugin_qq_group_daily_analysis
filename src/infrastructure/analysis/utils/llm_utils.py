@@ -12,27 +12,15 @@ from astrbot.api.star import Context
 from ....utils.logger import logger
 from ....utils.resilience import CircuitBreaker, GlobalRateLimiter
 from ...config.config_manager import ConfigManager
+from .llm_errors import (
+    describe_llm_error,
+    is_content_risk_error,
+    is_response_format_unsupported_error,
+    resolve_hard_timeout,
+)
 from .structured_output_schema import JSONObject, JSONValue
 
 _circuit_breakers = {}
-
-
-def _is_response_format_unsupported_error(error: Exception) -> bool:
-    """
-    判断是否为 Provider/网关不支持 response_format 的兼容性错误。
-    """
-    text = str(error).lower()
-    patterns = [
-        "response_format",
-        "json_schema",
-        "unexpected keyword argument",
-        "extra fields not permitted",
-        "unknown field",
-        "not support",
-        "not supported",
-        "invalid request",
-    ]
-    return any(pattern in text for pattern in patterns)
 
 
 def _get_circuit_breaker(provider_id: str) -> CircuitBreaker:
@@ -264,11 +252,11 @@ async def call_provider_with_retry(
     Returns:
         LLM生成的结果，失败时返回None
     """
-    # 注意: 超时由 AstrBot Provider 内部配置控制，不再使用插件层 asyncio.wait_for
-    # 用户可在 AstrBot WebUI 中为每个 Provider 配置 timeout 参数
+    # 单次请求的硬超时：插件配置 → Provider timeout → 兜底 300 秒，防止接口卡死导致任务一直挂起
     retries = config_manager.get_llm_retries()
     backoff = config_manager.get_llm_backoff()
     enable_streaming_llm_call = config_manager.get_enable_streaming_llm_call()
+    configured_hard_timeout = config_manager.get_llm_hard_timeout()
 
     # 1. 确定我们要尝试的 Provider 队列
     attempt_queue = []
@@ -295,6 +283,9 @@ async def call_provider_with_retry(
             logger.warning(f"Provider {pid} 熔断器已打开，跳过本次请求")
             raise Exception("Circuit breaker open")
 
+        hard_timeout, timeout_source = resolve_hard_timeout(
+            context, pid, configured_hard_timeout
+        )
         try:
             async with GlobalRateLimiter.get_instance().semaphore:
                 llm_kwargs: dict[str, JSONValue] = {
@@ -309,15 +300,25 @@ async def call_provider_with_retry(
                     llm_kwargs.update(extra_generate_kwargs)
 
                 if enable_streaming_llm_call:
-                    resp = await _call_provider_stream(context, pid, llm_kwargs)
+                    request = _call_provider_stream(context, pid, llm_kwargs)
                 else:
-                    resp = await context.llm_generate(**llm_kwargs)
+                    request = context.llm_generate(**llm_kwargs)
+                # 只给真正的模型请求计时，排队等待并发槽位的时间不算在内
+                try:
+                    resp = await asyncio.wait_for(request, timeout=hard_timeout)
+                except TimeoutError:
+                    raise TimeoutError(
+                        f"LLM 请求超过硬超时上限 {hard_timeout:g} 秒"
+                        f"（来源: {timeout_source}），已主动中断"
+                    ) from None
             cb.record_success()
             return resp
         except Exception as err:
-            if r_format is not None and _is_response_format_unsupported_error(err):
+            if r_format is not None and is_response_format_unsupported_error(err):
                 raise err
-            cb.record_failure()
+            # 风控拦截是内容问题而不是服务故障，不计入熔断，避免一个群的敏感内容把模型整体熔断
+            if not is_content_risk_error(err):
+                cb.record_failure()
             raise err
 
     # 3. 开始执行队列
@@ -329,8 +330,10 @@ async def call_provider_with_retry(
     # 惰性降级标记：仅在 primary provider 重试用尽后才 resolve fallback
     needs_fallback = provider_id_key is not None
 
-    for i, (current_pid, is_fallback) in enumerate(attempt_queue):
-        attempt_num = i + 1
+    queue_index = 0
+    while queue_index < len(attempt_queue):
+        current_pid, is_fallback = attempt_queue[queue_index]
+        attempt_num = queue_index + 1
 
         # 修复状态污染：如果切换了全新的 Provider，必须重置 response_format 约束
         if current_pid != previous_pid:
@@ -356,7 +359,7 @@ async def call_provider_with_retry(
             # 处理不支持 response_format 的情况
             if (
                 current_response_format is not None
-                and _is_response_format_unsupported_error(e)
+                and is_response_format_unsupported_error(e)
             ):
                 logger.warning(
                     f"{prefix}当前 Provider 可能不支持 response_format，已自动降级为无 schema 约束。"
@@ -370,9 +373,31 @@ async def call_provider_with_retry(
                 except Exception as inner_e:
                     last_exc = inner_e
 
-            logger.warning(f"{prefix}请求失败: {last_exc}")
-            # 惰性降级：仅当所有 primary provider 的重试都耗尽后才 resolve 并注入 fallback
-            if not is_fallback and i == retries - 1 and needs_fallback:
+            content_risk = is_content_risk_error(last_exc)
+            if content_risk:
+                logger.warning(
+                    f"{prefix}[内容风控拦截] Provider {current_pid} 拒绝处理本次群聊内容，"
+                    f"跳过该模型剩余的重试: {last_exc}\n"
+                    "  建议: 1. 配置审核更宽松的备用模型；2. 为分析模型设置客观中立的人格；"
+                    "3. 调整分析提示词；4. 过滤群内的违规发言"
+                )
+                # 同一个模型重试也会被同样拦截，直接剔除它剩下的重试
+                attempt_queue = [
+                    item
+                    for idx, item in enumerate(attempt_queue)
+                    if idx <= queue_index or item[0] != current_pid
+                ]
+                primary_exhausted = not is_fallback
+            else:
+                hint = describe_llm_error(last_exc)
+                logger.warning(
+                    f"{prefix}请求失败: {last_exc}" + (f"（{hint}）" if hint else "")
+                )
+                primary_exhausted = not is_fallback and queue_index == retries - 1
+
+            # 惰性降级：主 Provider 重试耗尽（或被风控）后才 resolve 并注入 fallback
+            if primary_exhausted and needs_fallback:
+                needs_fallback = False
                 fallback_provider_id = await get_provider_id_with_fallback(
                     context, config_manager, None, umo
                 )
@@ -383,12 +408,15 @@ async def call_provider_with_retry(
                     for _ in range(retries):
                         attempt_queue.append((fallback_provider_id, True))
 
-            is_last_attempt = i == len(attempt_queue) - 1
-            if not is_last_attempt:
+            is_last_attempt = queue_index == len(attempt_queue) - 1
+            # 风控后换模型无需退避等待
+            if not is_last_attempt and not content_risk:
                 # Exponential backoff with jitter: backoff * (2 ^ (attempt_num - 1)) + random jitter
                 sleep_time = backoff * (2 ** (attempt_num - 1)) + random.uniform(0, 1)
                 logger.debug(f"等待 {sleep_time:.2f} 秒后重试...")
                 await asyncio.sleep(sleep_time)
+
+            queue_index += 1
 
     logger.error(f"LLM请求队列全部耗尽，最终失败: {last_exc}")
     return None

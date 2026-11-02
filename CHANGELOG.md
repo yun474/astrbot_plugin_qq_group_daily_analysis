@@ -1,5 +1,20 @@
 # 更新日志 (CHANGELOG)
 
+## [v4.11.0] - 🐾 云云同步上游部分新功能
+*   **🛡️ 风控识别**: 识别 DeepSeek、OpenAI/Azure、GLM、通义千问、百度千帆、Gemini 等服务商的内容风控拦截。命中后不再重试同一模型，有备用模型时立即切换，且不计入熔断失败次数；日志给出换模型、调人格、调提示词等排查建议。
+*   **⏱️ 硬超时**: 新增 `llm.llm_hard_timeout`（默认 0）。单次大模型请求超过上限时主动中断并按重试 / 备用模型流程继续；为 0 时取 Provider 自己的 `timeout` 与 300 秒中较大的一个（Provider 的 timeout 是单次读取超时，不能直接当总时长用）。常见报错（密钥、余额、限流、连接、上下文过长等）会附带一句中文排查提示。
+*   **⏹️ /stop 停止**: 手动 `/群分析` 在分析和渲染阶段都可以用 AstrBot 原生 `/stop` 中途停止，机器人回复「群分析已停止」；定时分析不受影响。
+*   **🎨 新模板**: 新增 `maria`（圣母在上）、`deepseek_maid`（DeepSeek 鲸鱼女仆娘）、`art_nouveau`（新艺术运动）三个模板。装饰图随插件内置并内联到 HTML，不依赖 CDN；`deepseek_maid` 素材署名见 `assets/deepseek_maid/SOURCE-NOTICE.md`，`maria` 的可选人格与提示词见 `docs/maria_persona.md`。
+*   **🧩 自定义模板**: 支持从 GitHub 仓库链接或 zip 安装自定义模板（存放在插件数据目录 `custom_templates/`），安装、卸载后立即生效无需重启。安装时校验路径穿越、符号链接、文件大小，不能与内置模板重名；只有通过插件页面安装的模板才能卸载，卸载正在使用的模板会自动改回 `HatsuneMiku`。`/查看模板`、`/设置模板` 也能列出和切换自定义模板。
+*   **📈 增量按条数触发**: 增量分析改为每收到 `incremental_min_messages` 条新消息自动触发一次，计数持久保存、重启后接着数；分析成功才扣减计数，失败保留计数并冷却 5 分钟。定时点合并出最终报告的流程不变，`/增量状态` 增加本群计数显示。
+    *   **⚠️ 移除配置**: `incremental_interval_minutes`、`incremental_max_daily_analyses`、`incremental_safe_limit`、`incremental_active_start_hour`、`incremental_active_end_hour`、`incremental_stagger_seconds`。单次拉取上限改为沿用 `basic.max_messages`。
+*   **🖥️ 插件页面（WebUI）**: 在 AstrBot 管理面板中新增「群分析」页面，包含四个标签页：
+    *   **报告历史**: 每份成功生成的报告自动归档完整 HTML，可按群、日期筛选，在线查看、下载、删除；新增配置 `basic.report_archive_days`（默认 90 天，0 为永久保留）。
+    *   **模板管理**: 用内置示例数据在线预览全部模板、设为默认、安装和卸载自定义模板。
+    *   **任务状态**: 查看手动、定时、增量任务的当前阶段和耗时，可随时停止；显示增量群的消息计数和最近 50 条任务记录（重启后保留）。
+    *   **插件日志**: 查看本插件最近 2000 条日志，按级别、关键字筛选，支持自动刷新和复制。
+*   **📌 版本要求**: AstrBot 最低版本提高到 4.24.1（插件页面所需）。
+
 ## [v4.10.15] - 🛠️ 云云修复新版 AstrBot 下插件初始化失败
 *   **🚑 初始化修复**: 移除向插件 logger 注册的 `TraceLogFilter`。AstrBot 新版日志处理器在记录带 `trace_id` 时会同时读取 `span_id`，该过滤器只注入了 `trace_id`，导致插件初始化时第一条日志即抛出 `'LogRecord' object has no attribute 'span_id'`，定时分析任务因此始终未注册。
 *   **🔎 追踪不受影响**: 日志前缀中的 TraceID 由 `PluginLogger` 直接写入消息文本，移除过滤器后仍正常显示。

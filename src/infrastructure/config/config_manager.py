@@ -199,6 +199,14 @@ class ConfigManager:
         """获取LLM请求重试退避基值（秒），实际退避会乘以尝试次数"""
         return self._get_group("llm").get("llm_backoff", 2)
 
+    def get_report_archive_days(self) -> int:
+        """获取报告归档保留天数，0 表示永久保留"""
+        return int(self._get_group("basic").get("report_archive_days", 90) or 0)
+
+    def get_llm_hard_timeout(self) -> int:
+        """获取单次 LLM 请求硬超时（秒），0 表示遵循 Provider 自身配置"""
+        return int(self._get_group("llm").get("llm_hard_timeout", 0) or 0)
+
     def get_enable_streaming_llm_call(self) -> bool:
         """获取是否启用流式 LLM 调用"""
         return self._get_group("llm").get("enable_streaming_llm_call", False)
@@ -820,18 +828,6 @@ class ConfigManager:
         self._ensure_group("incremental")["incremental_report_immediately"] = enabled
         self.config.save_config()
 
-    def get_incremental_interval_minutes(self) -> int:
-        """获取增量分析间隔（分钟）"""
-        return self._get_group("incremental").get("incremental_interval_minutes", 120)
-
-    def get_incremental_max_daily_analyses(self) -> int:
-        """获取每天最大增量分析次数"""
-        return self._get_group("incremental").get("incremental_max_daily_analyses", 8)
-
-    def get_incremental_safe_limit(self) -> int:
-        """获取单次增量分析的安全分析/同步上限 (Safe Count)"""
-        return self._get_group("incremental").get("incremental_safe_limit", 2000)
-
     def get_incremental_min_messages(self) -> int:
         """获取触发增量分析的最小消息数阈值"""
         return self._get_group("incremental").get("incremental_min_messages", 20)
@@ -843,18 +839,6 @@ class ConfigManager:
     def get_incremental_quotes_per_batch(self) -> int:
         """获取单次增量分析提取的最大金句数"""
         return self._get_group("incremental").get("incremental_quotes_per_batch", 3)
-
-    def get_incremental_active_start_hour(self) -> int:
-        """获取增量分析活跃时段起始小时（24小时制）"""
-        return self._get_group("incremental").get("incremental_active_start_hour", 8)
-
-    def get_incremental_active_end_hour(self) -> int:
-        """获取增量分析活跃时段结束小时（24小时制）"""
-        return self._get_group("incremental").get("incremental_active_end_hour", 23)
-
-    def get_incremental_stagger_seconds(self) -> int:
-        """获取多群增量分析的交错间隔（秒），避免 API 压力"""
-        return self._get_group("incremental").get("incremental_stagger_seconds", 30)
 
     def save_config(self):
         """保存配置到AstrBot配置系统"""

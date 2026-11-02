@@ -1,0 +1,8 @@
+{
+  "views": {
+    "dashboard": {
+      "title": "Group Analysis",
+      "description": "Report history, templates, tasks and plugin logs"
+    }
+  }
+}

@@ -4,12 +4,18 @@
 """
 
 import asyncio
+import contextlib
 import time as time_mod
 from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger
 
 from ...application.services.analysis_application_service import DuplicateGroupTaskError
+from ...shared.task_context import (
+    mark_task_failed,
+    mark_task_result,
+    set_task_group_name,
+)
 from ...shared.trace_context import TraceContext
 from ...utils.logger import logger
 from ..messaging.message_sender import MessageSender
@@ -162,10 +168,9 @@ class AutoScheduler:
         logger.info("注册定时分析报告任务...")
         self._schedule_report_time_jobs(scheduler)
 
-        # 2. 只有在增量功能总开关开启时，才注册全天候的增量提取任务
+        # 2. 增量提取由群消息条数触发（见 IncrementalTrigger），这里只注册报告任务
         if self.config_manager.get_incremental_enabled():
-            logger.info("增量分析功能已开启，正在注册全天增量提取任务...")
-            self._schedule_incremental_cron_jobs(scheduler)
+            logger.info("增量分析已开启：攒够新消息自动提取，定时点合并出报告")
         else:
             logger.info("增量分析总开关未启用，仅执行传统定时全量分析。")
 
@@ -198,50 +203,6 @@ class AutoScheduler:
 
             except Exception as e:
                 logger.error(f"注册定时任务失败 ({t_str}): {e}")
-
-    def _schedule_incremental_cron_jobs(self, scheduler):
-        """
-        在活跃时段注册增量分析定时任务。
-
-        这类任务仅执行增量数据的提取；而报告生成阶段在配置的每日分析时间点进行。
-        """
-        active_start_hour = self.config_manager.get_incremental_active_start_hour()
-        active_end_hour = self.config_manager.get_incremental_active_end_hour()
-        interval_minutes = self.config_manager.get_incremental_interval_minutes()
-        max_daily = self.config_manager.get_incremental_max_daily_analyses()
-
-        # 计算活跃时段内的触发时间点
-        trigger_times = []
-        current_minutes = active_start_hour * 60
-        end_minutes = active_end_hour * 60
-
-        while current_minutes < end_minutes and len(trigger_times) < max_daily:
-            hour = current_minutes // 60
-            minute = current_minutes % 60
-            trigger_times.append((hour, minute))
-            current_minutes += interval_minutes
-
-        # 注册增量分析任务
-        for hour, minute in trigger_times:
-            try:
-                trigger = CronTrigger(hour=hour, minute=minute)
-                job_id = f"incremental_analysis_{hour:02d}{minute:02d}"
-
-                scheduler.add_job(
-                    self._run_incremental_analysis,
-                    trigger=trigger,
-                    id=job_id,
-                    replace_existing=True,
-                    misfire_grace_time=60,
-                )
-                self.scheduler_job_ids.append(job_id)
-                logger.info(
-                    f"已注册增量分析任务: {hour:02d}:{minute:02d} (Job ID: {job_id})"
-                )
-            except Exception as e:
-                logger.error(f"注册增量分析任务失败 ({hour:02d}:{minute:02d}): {e}")
-
-        logger.info(f"增量调度注册完成: {len(trigger_times)} 个增量分析任务")
 
     def unschedule_jobs(self, context):
         """取消定时任务"""
@@ -418,7 +379,21 @@ class AutoScheduler:
         except Exception as e:
             logger.error(f"定时报告执行失败: {e}", exc_info=True)
 
+    def _track(self, group_id: str, platform_id: str | None, source: str):
+        """在任务登记表里登记一次分析任务（供 WebUI 任务状态页查看和停止）"""
+        registry = getattr(self.plugin_instance, "task_registry", None)
+        if registry is None:
+            return contextlib.nullcontext()
+        return registry.track(group_id, platform_id or "", source)
+
     async def _perform_auto_analysis_for_group_with_timeout(
+        self, group_id: str, target_platform_id: str | None = None
+    ):
+        """为指定群执行自动分析（登记任务 + 超时控制）"""
+        async with self._track(group_id, target_platform_id, "scheduled"):
+            await self._auto_analysis_with_timeout(group_id, target_platform_id)
+
+    async def _auto_analysis_with_timeout(
         self, group_id: str, target_platform_id: str | None = None
     ):
         """为指定群执行自动分析（带超时控制）"""
@@ -430,8 +405,10 @@ class AutoScheduler:
             )
         except asyncio.TimeoutError:
             logger.error(f"群 {group_id} 分析超时（30分钟），跳过该群分析")
+            mark_task_failed("timeout")
         except Exception as e:
             logger.error(f"群 {group_id} 分析任务执行失败: {e}")
+            mark_task_failed(str(e))
 
     async def _perform_auto_analysis_for_group(
         self, group_id: str, target_platform_id: str | None = None
@@ -442,6 +419,7 @@ class AutoScheduler:
             group_name = await self._get_group_name_safe(group_id, target_platform_id)
             trace_id = TraceContext.generate(prefix="group", group_name=group_name)
             TraceContext.set(trace_id)
+            set_task_group_name(group_name)
 
             if self._terminating:
                 return
@@ -453,6 +431,7 @@ class AutoScheduler:
             # 检查平台状态 (BotManager 为基础设施层，用于获取平台就绪状态)
             if not self.bot_manager.is_ready_for_auto_analysis():
                 logger.warning(f"群 {group_id} 自动分析跳过：bot管理器未就绪")
+                mark_task_result({"reason": "bot_not_ready"})
                 return
 
             # 委派给应用层服务执行核心用例
@@ -464,6 +443,7 @@ class AutoScheduler:
             if not result.get("success"):
                 reason = result.get("reason")
                 logger.info(f"群 {group_id} 自动分析跳过: {reason}")
+                mark_task_result(result)
                 return
 
             # 获取分析结果及适配器
@@ -484,9 +464,11 @@ class AutoScheduler:
         except DuplicateGroupTaskError:
             # group_lock 抛出的 DuplicateGroupTaskError 表示任务正在运行，优雅跳过
             logger.debug(f"群 {group_id} 任务因并发锁冲突而跳过（已在运行）")
+            mark_task_result({"reason": "already_running"})
             raise  # 重新抛出，让上层知道任务并没真正执行而是跳过了
         except Exception as e:
             logger.error(f"群 {group_id} 自动分析执行失败: {e}", exc_info=True)
+            mark_task_failed(str(e))
         finally:
             logger.debug(f"群 {group_id} 自动分析流程结束")
 
@@ -494,92 +476,41 @@ class AutoScheduler:
     # 增量模式：增量分析
     # ================================================================
 
-    async def _run_incremental_analysis(self):
-        """为所有目标模式设定为 incremental 的群执行增量分析任务。"""
+    async def run_incremental_for_group(self, group_id: str, platform_id: str):
+        """消息条数触发的单群增量分析入口（由 IncrementalTrigger 调用）"""
         if self._terminating:
-            return
-        try:
-            logger.info("开始执行自动增量分析（并发模式）")
+            return {"success": False, "reason": "terminating"}
 
-            # 仅选取模式为 incremental 的目标群
-            incr_targets = await self._get_scheduled_targets(mode_filter="incremental")
+        result = await self._perform_incremental_analysis_for_group_with_timeout(
+            group_id, platform_id
+        )
 
-            if not incr_targets:
-                logger.info("没有配置为增量模式的群聊需要增量分析")
-                return
-
-            target_list = incr_targets
-            stagger = self.config_manager.get_incremental_stagger_seconds()
-            max_concurrent = self.config_manager.get_max_concurrent_tasks()
-
-            logger.info(
-                f"将为 {len(target_list)} 个群聊执行增量分析 "
-                f"(并发限制: {max_concurrent}, 交错间隔: {stagger}秒)"
+        # 为调试提供的立即上报选项
+        if (
+            self.config_manager.get_incremental_report_immediately()
+            and isinstance(result, dict)
+            and result.get("success")
+        ):
+            logger.info(f"增量分析立即报告模式生效，正在为群 {group_id} 生成报告...")
+            await self._perform_incremental_final_report_for_group_with_timeout(
+                group_id, platform_id
             )
 
-            sem = asyncio.Semaphore(max_concurrent)
-
-            async def staggered_incremental(idx, gid, pid):
-                if idx > 0 and stagger > 0:
-                    await asyncio.sleep(stagger * idx)
-
-                async with sem:
-                    result = (
-                        await self._perform_incremental_analysis_for_group_with_timeout(
-                            gid, pid
-                        )
-                    )
-
-                    # 为调试提供的立即上报选项
-                    if self.config_manager.get_incremental_report_immediately():
-                        if isinstance(result, dict) and result.get("success"):
-                            logger.info(
-                                f"增量分析立即报告模式生效，正在为群 {gid} 生成报告..."
-                            )
-                            await self._perform_incremental_final_report_for_group_with_timeout(
-                                gid, pid
-                            )
-
-                    return result
-
-            analysis_tasks = []
-            for idx, (gid, pid, _mode) in enumerate(target_list):
-                if self._terminating:
-                    logger.info("检测到插件正在停止，取消后续增量分析任务创建")
-                    break
-                task = asyncio.create_task(
-                    staggered_incremental(idx, gid, pid),
-                    name=f"incremental_group_{gid}",
-                )
-                analysis_tasks.append(task)
-
-            results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
-
-            success_count = 0
-            skip_count = 0
-            error_count = 0
-
-            for i, result in enumerate(results):
-                gid, _, _ = target_list[i]
-                if isinstance(result, DuplicateGroupTaskError):
-                    skip_count += 1
-                elif isinstance(result, Exception):
-                    logger.error(f"群 {gid} 增量分析任务异常: {result}")
-                    error_count += 1
-                elif isinstance(result, dict) and not result.get("success", True):
-                    skip_count += 1
-                else:
-                    success_count += 1
-
-            logger.info(
-                f"增量分析完成 - 成功: {success_count}, 跳过: {skip_count}, "
-                f"失败: {error_count}, 总计: {len(target_list)}"
-            )
-
-        except Exception as e:
-            logger.error(f"增量分析执行失败: {e}", exc_info=True)
+        return result
 
     async def _perform_incremental_analysis_for_group_with_timeout(
+        self, group_id: str, target_platform_id: str | None = None
+    ):
+        """为指定群执行增量分析（登记任务 + 超时控制）"""
+        result = None
+        async with self._track(group_id, target_platform_id, "incremental"):
+            result = await self._incremental_analysis_with_timeout(
+                group_id, target_platform_id
+            )
+            mark_task_result(result)
+        return result
+
+    async def _incremental_analysis_with_timeout(
         self, group_id: str, target_platform_id: str | None = None
     ):
         """为指定群执行增量分析（带超时控制，10分钟）"""
@@ -607,6 +538,7 @@ class AutoScheduler:
             group_name = await self._get_group_name_safe(group_id, target_platform_id)
             trace_id = TraceContext.generate(prefix="incr", group_name=group_name)
             TraceContext.set(trace_id)
+            set_task_group_name(group_name)
 
             if self._terminating:
                 return
@@ -657,6 +589,18 @@ class AutoScheduler:
     # ================================================================
 
     async def _perform_incremental_final_report_for_group_with_timeout(
+        self, group_id: str, target_platform_id: str | None = None
+    ):
+        """增量最终报告（登记任务 + 超时 + 回退）"""
+        result = None
+        async with self._track(group_id, target_platform_id, "incremental_report"):
+            result = await self._incremental_final_report_with_timeout(
+                group_id, target_platform_id
+            )
+            mark_task_result(result)
+        return result
+
+    async def _incremental_final_report_with_timeout(
         self, group_id: str, target_platform_id: str | None = None
     ):
         """带超时及回退机制的增量最终报告生成。
@@ -731,6 +675,7 @@ class AutoScheduler:
             group_name = await self._get_group_name_safe(group_id, target_platform_id)
             trace_id = TraceContext.generate(prefix="report", group_name=group_name)
             TraceContext.set(trace_id)
+            set_task_group_name(group_name)
 
             if self._terminating:
                 return

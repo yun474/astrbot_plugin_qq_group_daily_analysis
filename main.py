@@ -27,6 +27,13 @@ from .src.application.services.analysis_application_service import (
 from .src.application.services.message_processing_service import (
     MessageProcessingService,
 )
+from .src.application.services.stop_request import (
+    AnalysisStoppedError,
+    StopRequest,
+    run_stoppable,
+)
+from .src.application.services.task_registry import TaskRegistry
+from .src.application.services.template_admin_service import TemplateAdminService
 from .src.domain.services.analysis_domain_service import AnalysisDomainService
 from .src.domain.services.incremental_merge_service import IncrementalMergeService
 from .src.domain.services.statistics_service import StatisticsService
@@ -39,6 +46,7 @@ from .src.infrastructure.persistence.telegram_group_registry import (
     TelegramGroupRegistry,
 )
 from .src.infrastructure.platform.bot_manager import BotManager
+from .src.infrastructure.platform.stop_signal import FrontendStopWatcher
 from .src.infrastructure.platform.template_preview import (
     TelegramTemplatePreviewHandler,
     TemplatePreviewRouter,
@@ -46,10 +54,13 @@ from .src.infrastructure.platform.template_preview import (
 from .src.infrastructure.reporting.generators import ReportGenerator
 from .src.infrastructure.reporting.local_browser_renderer import LocalBrowserRenderer
 from .src.infrastructure.scheduler.auto_scheduler import AutoScheduler
+from .src.infrastructure.scheduler.incremental_trigger import IncrementalTrigger
 from .src.shared.constants import PLUGIN_NAME
+from .src.shared.task_context import mark_task_result, set_stage
 from .src.shared.trace_context import TraceContext
 from .src.utils.logger import logger
 from .src.utils.resilience import GlobalRateLimiter
+from .src.webui import register_webui_routes
 
 
 class GroupDailyAnalysis(Star):
@@ -74,6 +85,9 @@ class GroupDailyAnalysis(Star):
     telegram_template_preview_handler: TelegramTemplatePreviewHandler
     template_preview_router: TemplatePreviewRouter
     auto_scheduler: AutoScheduler
+    incremental_trigger: IncrementalTrigger
+    task_registry: TaskRegistry
+    template_admin_service: TemplateAdminService
     message_sender: MessageSender
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -127,7 +141,8 @@ class GroupDailyAnalysis(Star):
             context, self.telegram_group_registry
         )
         self.template_command_service = TemplateCommandService(
-            plugin_root=os.path.dirname(__file__)
+            plugin_root=os.path.dirname(__file__),
+            catalog=self.report_generator.html_templates.catalog,
         )
         self.telegram_template_preview_handler = TelegramTemplatePreviewHandler(
             config_manager=self.config_manager,
@@ -147,6 +162,17 @@ class GroupDailyAnalysis(Star):
             self._html_render_with_strategy,
             plugin_instance=self,
         )
+        # 增量分析：按群消息条数触发
+        self.incremental_trigger = IncrementalTrigger(
+            self.config_manager, self, self.auto_scheduler.run_incremental_for_group
+        )
+
+        # WebUI 插件页面：任务登记、模板管理和后端接口
+        self.task_registry = TaskRegistry(self)
+        self.template_admin_service = TemplateAdminService(
+            self.config_manager, self.report_generator
+        )
+        register_webui_routes(self)
 
         # 同步全局限流并进行初始化配置
         GlobalRateLimiter.get_instance(self.config_manager.get_llm_max_concurrent())
@@ -216,6 +242,9 @@ class GroupDailyAnalysis(Star):
                 # 3. 强制注册定时分析任务
                 if self.auto_scheduler:
                     self.auto_scheduler.schedule_jobs(self.context)
+
+                # 4. 恢复增量消息计数，已达阈值的群立即补跑
+                await self.incremental_trigger.start()
 
                 self._initialized = True
                 self._discovery_run = True
@@ -338,6 +367,9 @@ class GroupDailyAnalysis(Star):
                 logger.debug("正在停止自动调度器...")
                 self.auto_scheduler.unschedule_jobs(self.context)
 
+            # 停止增量触发任务并保存未消费的消息计数
+            await self.incremental_trigger.close()
+
             if self.template_preview_router:
                 await self.template_preview_router.unregister_handlers()
 
@@ -353,6 +385,26 @@ class GroupDailyAnalysis(Star):
 
         except Exception as e:
             logger.error(f"插件资源清理失败: {e}")
+
+    # ==================== 增量分析消息计数 ====================
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
+    async def count_incremental_group_message(self, event: AstrMessageEvent):
+        """为增量群累计新消息条数，只计数，不处理消息内容"""
+        if self._terminating:
+            return
+        group_id = self._get_group_id_from_event(event)
+        if not group_id:
+            return
+        try:
+            await self.incremental_trigger.record_message(
+                platform_id=self._get_platform_id_from_event(event),
+                group_id=str(group_id),
+                umo=event.unified_msg_origin,
+                message_id=str(getattr(event.message_obj, "message_id", "") or ""),
+            )
+        except Exception as e:
+            logger.warning(f"增量消息计数失败: {e}")
 
     # ==================== Telegram 消息拦截器 ====================
 
@@ -556,6 +608,9 @@ class GroupDailyAnalysis(Star):
         if current_task:
             self._background_tasks.add(current_task)
 
+        # 监听 AstrBot 原生 /stop，分析和渲染阶段都可以中途停止
+        stop_watcher = FrontendStopWatcher(event)
+
         try:
             event.should_call_llm(True)  # 阻止默认 LLM 解析
             group_id = self._get_group_id_from_event(event)
@@ -621,9 +676,7 @@ class GroupDailyAnalysis(Star):
             adapter = self.bot_manager.get_adapter(platform_id)
             orig_msg_id = getattr(event.message_obj, "message_id", None)
             use_text_reply = self.config_manager.get_enable_analysis_reply()
-            is_qq_official_history = bool(
-                getattr(adapter, "uses_history_cache", False)
-            )
+            is_qq_official_history = bool(getattr(adapter, "uses_history_cache", False))
             show_analysis_prompt = use_text_reply or is_qq_official_history
 
             if show_analysis_prompt:
@@ -633,33 +686,54 @@ class GroupDailyAnalysis(Star):
                     event.get_group_id(), orig_msg_id, "analysis_started"
                 )
 
-            # 调用 DDD 应用级服务
-            result = await self.analysis_service.execute_daily_analysis(
-                group_id=group_id, platform_id=platform_id, manual=True, days=days
-            )
-
-            if not result.get("success"):
-                reason = result.get("reason")
-                if reason == "no_messages":
-                    yield event.plain_result("❌ 未找到足够的群聊记录")
-                elif reason == "muted":
-                    logger.warning(
-                        f"群 {group_id} 开启了全群禁言或对 Bot 禁言，跳过回复以防抛出发送异常"
-                    )
-                else:
-                    yield event.plain_result("❌ 分析失败，原因未知")
-                return
-
-            if not show_analysis_prompt and adapter and orig_msg_id:
-                await adapter.set_reaction(
-                    event.get_group_id(), orig_msg_id, "analysis_done"
+            # 登记任务：WebUI 任务状态页可以查看进度，也可以停止
+            async with self.task_registry.track(
+                group_id,
+                platform_id,
+                "manual",
+                group_name=group_name,
+                stop_request=stop_watcher.stop_request,
+            ):
+                # 调用 DDD 应用级服务
+                stop_watcher.start()
+                result = await run_stoppable(
+                    self.analysis_service.execute_daily_analysis(
+                        group_id=group_id,
+                        platform_id=platform_id,
+                        manual=True,
+                        days=days,
+                    ),
+                    stop_watcher.stop_request,
                 )
 
-            async for res in self._send_analysis_report(event, result):
-                yield res
+                if not result.get("success"):
+                    mark_task_result(result)
+                    reason = result.get("reason")
+                    if reason == "no_messages":
+                        yield event.plain_result("❌ 未找到足够的群聊记录")
+                    elif reason == "muted":
+                        logger.warning(
+                            f"群 {group_id} 开启了全群禁言或对 Bot 禁言，跳过回复以防抛出发送异常"
+                        )
+                    else:
+                        yield event.plain_result("❌ 分析失败，原因未知")
+                    return
+
+                if not show_analysis_prompt and adapter and orig_msg_id:
+                    await adapter.set_reaction(
+                        event.get_group_id(), orig_msg_id, "analysis_done"
+                    )
+
+                async for res in self._send_analysis_report(
+                    event, result, stop_watcher.stop_request
+                ):
+                    yield res
 
         except DuplicateGroupTaskError:
             yield event.plain_result("📊 该群的分析任务正在执行中，请稍后再试哦~")
+        except AnalysisStoppedError:
+            logger.info("手动群分析已按 /stop 请求停止")
+            yield event.plain_result("⏹️ 群分析已停止")
         except asyncio.CancelledError:
             logger.info("群分析任务被取消 (插件重载或卸载)")
         except Exception as e:
@@ -668,11 +742,15 @@ class GroupDailyAnalysis(Star):
                 f"❌ 分析失败: {str(e)}。请检查网络连接和LLM配置，或联系管理员"
             )
         finally:
+            await stop_watcher.stop()
             if current_task:
                 self._background_tasks.discard(current_task)
 
     async def _send_analysis_report(
-        self, event: AstrMessageEvent, result: dict
+        self,
+        event: AstrMessageEvent,
+        result: dict,
+        stop_request: StopRequest | None = None,
     ) -> AsyncGenerator:
         """处理分析结果的渲染和发送"""
         if self._terminating or not self.config_manager:
@@ -700,15 +778,19 @@ class GroupDailyAnalysis(Star):
             return None
 
         if output_format == "image":
-            image_url, html_content = await self.report_generator.generate_image_report(
-                analysis_result,
-                group_id,
-                self._html_render_with_strategy,
-                avatar_url_getter=avatar_url_getter,
-                nickname_getter=nickname_getter,
-                avatar_cache_namespace=platform_id,
+            image_url, html_content = await run_stoppable(
+                self.report_generator.generate_image_report(
+                    analysis_result,
+                    group_id,
+                    self._html_render_with_strategy,
+                    avatar_url_getter=avatar_url_getter,
+                    nickname_getter=nickname_getter,
+                    avatar_cache_namespace=platform_id,
+                ),
+                stop_request,
             )
 
+            set_stage("发送报告")
             if image_url:
                 caption = TraceContext.make_report_caption()
                 if is_qq_official_history:
@@ -741,12 +823,15 @@ class GroupDailyAnalysis(Star):
             return
 
         elif output_format == "html":
-            html_path, json_path = await self.report_generator.generate_html_report(
-                analysis_result,
-                group_id,
-                avatar_url_getter=avatar_url_getter,
-                nickname_getter=nickname_getter,
-                avatar_cache_namespace=platform_id,
+            html_path, json_path = await run_stoppable(
+                self.report_generator.generate_html_report(
+                    analysis_result,
+                    group_id,
+                    avatar_url_getter=avatar_url_getter,
+                    nickname_getter=nickname_getter,
+                    avatar_cache_namespace=platform_id,
+                ),
+                stop_request,
             )
             if html_path:
                 is_only_url = self.config_manager.get_html_only_url()
@@ -1053,14 +1138,8 @@ class GroupDailyAnalysis(Star):
             incremental_enabled = self.config_manager.get_incremental_enabled()
             incremental_status_text = "未启用"
             if incremental_enabled:
-                interval = self.config_manager.get_incremental_interval_minutes()
-                max_daily = self.config_manager.get_incremental_max_daily_analyses()
-                active_start = self.config_manager.get_incremental_active_start_hour()
-                active_end = self.config_manager.get_incremental_active_end_hour()
-                incremental_status_text = (
-                    f"已启用 (间隔{interval}分钟, 最多{max_daily}次/天, "
-                    f"活跃时段{active_start}:00-{active_end}:00)"
-                )
+                min_messages = self.config_manager.get_incremental_min_messages()
+                incremental_status_text = f"已启用 (每 {min_messages} 条新消息分析一次)"
 
             debug_report = self.config_manager.get_incremental_report_immediately()
             debug_status = "✅ 开启" if debug_report else "❌ 关闭"
@@ -1090,6 +1169,8 @@ class GroupDailyAnalysis(Star):
             yield event.plain_result("ℹ️ 增量分析模式未启用，请在插件配置中开启")
             return
 
+        counter_text = await self._format_incremental_counter(event, group_id)
+
         import time as time_mod
 
         # 计算滑动窗口范围
@@ -1108,6 +1189,7 @@ class GroupDailyAnalysis(Star):
             start_str = datetime.fromtimestamp(window_start).strftime("%m-%d %H:%M")
             end_str = datetime.fromtimestamp(window_end).strftime("%m-%d %H:%M")
             yield event.plain_result(
+                f"{counter_text}\n"
                 f"📊 滑动窗口 ({start_str} ~ {end_str}) 内尚无增量分析数据"
             )
             return
@@ -1119,6 +1201,7 @@ class GroupDailyAnalysis(Star):
         summary = state.get_summary()
 
         yield event.plain_result(
+            f"{counter_text}\n"
             f"📊 增量分析状态 (窗口: {summary['window']})\n"
             f"• 分析次数: {summary['total_analyses']}\n"
             f"• 累计消息: {summary['total_messages']}\n"
@@ -1127,6 +1210,31 @@ class GroupDailyAnalysis(Star):
             f"• 参与者: {summary['participants']}\n"
             f"• 高峰时段: {summary['peak_hours']}"
         )
+
+    async def _format_incremental_counter(
+        self, event: AstrMessageEvent, group_id: str
+    ) -> str:
+        """本群的增量消息计数状态（一行文字）"""
+        if not self.incremental_trigger.is_target_group(event.unified_msg_origin):
+            return "🧮 本群不在增量分析名单中"
+        await self.incremental_trigger.ensure_loaded()
+        platform_id = self._get_platform_id_from_event(event)
+        threshold = self.config_manager.get_incremental_min_messages()
+        state = next(
+            (
+                s
+                for s in self.incremental_trigger.snapshot()
+                if s["group_id"] == str(group_id) and s["platform_id"] == platform_id
+            ),
+            None,
+        )
+        count = state["count"] if state else 0
+        text = f"🧮 新消息计数: {count}/{threshold}"
+        if state and state["running"]:
+            text += "（分析进行中）"
+        elif state and state["cooldown_seconds"]:
+            text += f"（上次失败，{state['cooldown_seconds']} 秒后可重新触发）"
+        return text
 
     async def _handle_settings_enable(self, event: AstrMessageEvent, group_id: str):
         """协助逻辑：处理启用设置的分支逻辑"""

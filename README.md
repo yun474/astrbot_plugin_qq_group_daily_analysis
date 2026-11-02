@@ -65,6 +65,20 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
       <img src="https://fastly.jsdelivr.net/gh/SXP-Simon/astrbot_plugin_qq_group_daily_analysis@main/assets/format-demo.jpg" alt="simple" width="100%">
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33.3%" valign="top">
+      <p><b>Maria（圣母在上）</b></p>
+      <img src="https://fastly.jsdelivr.net/gh/SXP-Simon/astrbot_plugin_qq_group_daily_analysis@main/assets/maria-demo.webp" alt="maria" width="100%">
+    </td>
+    <td align="center" width="33.3%" valign="top">
+      <p><b>DeepSeek 鲸鱼女仆娘</b></p>
+      <img src="https://fastly.jsdelivr.net/gh/SXP-Simon/astrbot_plugin_qq_group_daily_analysis@main/assets/deepseek_maid-demo.webp" alt="deepseek_maid" width="100%">
+    </td>
+    <td align="center" width="33.3%" valign="top">
+      <p><b>Art Nouveau（新艺术运动）</b></p>
+      <img src="https://fastly.jsdelivr.net/gh/SXP-Simon/astrbot_plugin_qq_group_daily_analysis@main/assets/art_nouveau-demo.webp" alt="art_nouveau" width="100%">
+    </td>
+  </tr>
 </table>
 
 
@@ -145,6 +159,8 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 > Docker 容器内通常需要保持 `本地 Chromium 禁用沙箱` 开启；本地渲染会占用更多 CPU/内存，建议 `最大T2I渲染并发数` 保持为 `1`；本地浏览器空闲 2 分钟后自动退出，下次渲染时重新启动。
 >
 > 初音未来（HatsuneMiku）的 6 张装饰图随插件保存在 `assets/HatsuneMiku/`，渲染时直接嵌入 HTML；本地截图、AstrBot T2I 和 HTML 报告均无需访问这批图片的图床。字体、图标脚本和其他外部图片仍可能需要网络。已生成的旧报告需要重新生成才会采用本地图片。
+>
+> 新模板 `maria`、`deepseek_maid` 的装饰图同样随插件保存在 `assets/maria/`、`assets/deepseek_maid/`，渲染时嵌入 HTML，不依赖 CDN。`deepseek_maid` 的角色图像沿用 CC BY-NC-SA 4.0 许可，素材署名与来源见 [`assets/deepseek_maid/SOURCE-NOTICE.md`](assets/deepseek_maid/SOURCE-NOTICE.md)；`maria` 模板可搭配的专属人格与提示词见 [`docs/maria_persona.md`](docs/maria_persona.md)（仅供参考，不会自动应用）。
 > 
 > ### 3. 使用备用 T2I 服务或自部署
 > <details>
@@ -187,7 +203,9 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 - **群组管理**: 支持指定特定群组启用功能（支持跨平台黑白名单）
 - **参数调节**: 可自定义分析天数、消息数量等参数
 - **定时任务**: 支持设置每日自动分析时间
-- **增量分析**: 全新的滑动窗口分析模式，全天候覆盖群聊消息
+- **增量分析**: 每攒够一定条数的新消息自动提取一次摘要，定时点合并出报告
+- **插件页面（WebUI）**: 在 AstrBot 管理面板里查看报告历史、管理和安装模板、查看和停止分析任务、查看插件日志
+- **稳定性**: 大模型请求有硬超时，内容被风控拦截时直接切换备用模型
 - **自定义LLM服务**: 支持自定义指定的LLM服务
 
 
@@ -281,13 +299,14 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 - 分析群聊近期活动
 - 天数可选，默认为1天
 - 例如：`/群分析 3` 分析最近3天的群聊
+- 分析过程中发送 AstrBot 自带的 `/stop` 可以中途停止，机器人会回复「群分析已停止」（`/stop` 是 AstrBot 原生指令，会停止当前会话里所有正在运行的任务）
 
 #### 增量状态
 ```
 /增量状态
 ```
 - 查看当前增量分析的实时状态
-- 显示当前滑动窗口内的分析次数、消息数、话题数等统计
+- 显示本群攒了多少条新消息、触发条数，以及当前滑动窗口内的分析次数、消息数、话题数等统计
 - **仅在启用增量分析模式时可用**
 
 #### 分析设置
@@ -308,6 +327,19 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 - `/设置模板`: 查看当前模板和可用模板列表
 - `/设置模板 [序号]`: 切换到指定序号的模板
 - 例如：`/设置模板 1` 或 `/设置模板 scrapbook`
+- 通过插件页面安装的自定义模板也会出现在列表里
+
+### 插件页面（WebUI）
+
+需要 AstrBot ≥ 4.24.1。在 AstrBot 管理面板左侧栏点「群分析」，或在插件详情页打开「群分析」视图：
+
+- **报告历史**：每份成功生成的报告都会自动归档一份 HTML（默认保留 90 天，配置项 `basic.report_archive_days`，0 为永久保留）。可以按群、日期筛选，在线查看、下载、删除。
+- **模板管理**：用内置示例数据在线预览所有模板，一键设为默认。可以输入 GitHub 仓库链接或上传 zip 安装自定义模板，安装后立即可用；通过页面安装的模板可以在页面上卸载，卸载正在使用的模板会自动改回 `HatsuneMiku`。
+  - 模板目录必须包含 `image_template.html`，建议同时提供 `topic_item.html`、`user_title_item.html`、`quote_item.html`、`activity_chart.html`、`chat_quality_item.html`，缺少的板块会空白。可选的 `template.json` 用来写显示名、描述和标签（`name`、`desc`、`tag`、`tag_color`）。
+  - 自定义模板保存在插件数据目录的 `custom_templates/` 下，不能与内置模板重名；手动放进去的模板也能使用，但只能手动删除。
+  - 模板会在服务器上执行（Jinja2），和安装插件一样，请只安装信得过的来源。
+- **任务状态**：查看正在运行的分析任务（手动、定时、增量）和当前阶段，可以随时停止；也能看到增量群的消息计数和最近 50 条任务记录。
+- **插件日志**：查看本插件最近 2000 条日志，可按级别、关键字筛选，支持自动刷新和复制。
 
 ## 平台支持与要求
 
@@ -332,12 +364,14 @@ _✨ 一个基于 AstrBot 的智能群聊分析插件，支持 **QQ (OneBot / �
 增量分析模式是为了解决消息量大的群聊（如日均消息 > 500 条）在单次分析时容易丢失上下文的问题。
 
 **核心特性：**
+- **按消息条数触发**：增量群每收到 `incremental_min_messages` 条新消息，就自动执行一次小批量分析，减轻 LLM 瞬时压力。计数会持久保存，重启后接着数；分析失败时保留计数，5 分钟后由新消息重新触发。
 - **滑动窗口**：不再受限于自然日，分析窗口随时间滑动（如过去 24 小时），确保任何时候生成的报告都覆盖完整的时间段。
-- **分批处理**：定时（如每 2 小时）执行一次小批量分析，减轻 LLM 瞬时压力。
+- **定时合并出报告**：到了定时分析时间点，合并窗口内所有批次生成最终报告。
 - **自动去重**：智能识别重复话题和金句，合并生成最终报告。
 
 **启用方法：**
-- 通过 `incremental_group_list_mode + incremental_group_list` 指定哪些群走增量模式，并根据需要调整分析间隔 (`incremental_interval_minutes`) 和消息阈值。
+- 通过 `incremental_group_list_mode + incremental_group_list` 指定哪些群走增量模式，并按群的活跃程度调整触发条数 `incremental_min_messages`。增量群必须同时在定时分析名单里。
+- QQ 官方 Bot 只能收到平台推送给机器人的消息，计数也只统计这部分消息。
 
 ## HTML 报告与自建外链
 

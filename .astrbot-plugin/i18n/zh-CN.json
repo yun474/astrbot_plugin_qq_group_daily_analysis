@@ -1,0 +1,8 @@
+{
+  "views": {
+    "dashboard": {
+      "title": "群分析",
+      "description": "报告历史、模板管理、任务状态和插件日志"
+    }
+  }
+}

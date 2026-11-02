@@ -28,6 +28,7 @@
 
 基础设施层 (Infrastructure)
 ├── IncrementalStore          # 批次持久化（KV索引 + 批次数据）
+├── IncrementalTrigger        # 按群消息条数触发增量分析（计数持久化）
 ├── AutoScheduler             # 调度器（传统/增量双模式 + 过期清理）
 └── LLMAnalyzer               # LLM分析（增量并发方法）
 ```
@@ -47,9 +48,10 @@
 ### 增量分析批次流程
 
 ```
-定时触发 → AutoScheduler._run_incremental_analysis()
-    → 获取启用的群聊目标
-    → 交错并发执行（控制API压力）
+群消息到达 → main.count_incremental_group_message()
+    → IncrementalTrigger.record_message()（按消息 ID 去重，计数延迟 5 秒写入 KV）
+    → 计数达到 incremental_min_messages 时安排分析（同一群同时只跑一个，受最大并发数限制）
+        → AutoScheduler.run_incremental_for_group()
         → AnalysisApplicationService.execute_incremental_analysis()
             → 获取 last_analyzed_timestamp（跨批次去重）
             → 拉取自上次分析以来的新消息
@@ -136,16 +138,16 @@ similarity = len(chars_a & chars_b) / len(chars_a | chars_b)
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `incremental_enabled` | `false` | 是否启用增量分析模式 |
-| `incremental_interval_minutes` | `120` | 增量分析间隔（分钟） |
-| `incremental_max_daily_analyses` | `8` | 每日最大增量分析次数 |
-| `incremental_max_messages` | `300` | 每次增量分析最大消息数 |
-| `incremental_min_messages` | `20` | 触发增量分析的最小消息数 |
+| `incremental_group_list_mode` + `incremental_group_list` | `whitelist` + 空 | 哪些群走增量模式（白名单为空即不启用） |
+| `incremental_min_messages` | `300` | 每收到多少条新消息触发一次增量分析 |
 | `incremental_topics_per_batch` | `3` | 每次增量分析提取的话题数 |
 | `incremental_quotes_per_batch` | `3` | 每次增量分析提取的金句数 |
-| `incremental_active_start_hour` | `8` | 增量分析活跃时段开始小时 |
-| `incremental_active_end_hour` | `23` | 增量分析活跃时段结束小时 |
-| `incremental_stagger_seconds` | `30` | 多群并发分析的交错间隔（秒） |
+| `incremental_report_immediately` | `false` | 每次增量分析后立即出报告（调试用） |
+| `incremental_fallback_enabled` | `true` | 增量报告失败时回退全量分析 |
+
+> v4.11.0 起增量分析改为按消息条数触发，移除了按时间触发用的 `incremental_interval_minutes`、`incremental_max_daily_analyses`、`incremental_safe_limit`、`incremental_active_start_hour`、`incremental_active_end_hour`、`incremental_stagger_seconds`。单次拉取上限沿用 `basic.max_messages`。
+>
+> 计数规则：分析成功后扣掉实际分析的条数，还有积压会继续排空；新消息不足（指令等被过滤）时按实际条数校正；其他失败保留计数，冷却 5 分钟后由新消息重新触发。
 
 ## 调度模式对比
 
@@ -157,7 +159,7 @@ similarity = len(chars_a & chars_b) / len(chars_a | chars_b)
 
 ### 增量模式（新增）
 
-- 在活跃时段内按间隔执行小批量分析（如每2小时一次）
+- 每攒够 `incremental_min_messages` 条新消息执行一次小批量分析
 - 每次只分析上次以来的新消息，提取少量话题和金句
 - 在配置的报告时间点按滑动窗口合并所有批次生成最终报告
 - 适合消息量大、需要全天覆盖的群聊
@@ -167,7 +169,7 @@ similarity = len(chars_a & chars_b) / len(chars_a | chars_b)
 
 | 命令 | 说明 |
 |------|------|
-| `/增量状态` | 查看当前滑动窗口内的增量分析累积情况 |
+| `/增量状态` | 查看本群的新消息计数，以及当前滑动窗口内的增量分析累积情况 |
 | `/分析设置 status` | 查看完整设置状态（含增量分析配置） |
 
 ## 文件清单

@@ -22,10 +22,12 @@ from diskcache import Cache
 from markupsafe import Markup
 
 from ...domain.repositories.report_repository import IReportGenerator
+from ...shared.task_context import current_task, set_stage
 from ...utils.logger import logger
+from ..persistence.report_archive import ReportArchive
 from ..utils.template_utils import render_template
 from ..visualization.activity_charts import ActivityVisualizer
-from .templates import HTMLTemplates
+from .templates import HTMLTemplates, use_template
 
 MAX_CONCURRENT_DOWNLOADS = 10
 AVATAR_CACHE_EXPIRE_TIME = 259200
@@ -100,7 +102,14 @@ class ReportGenerator(IReportGenerator):
         self.config_manager = config_manager
         self.data_dir = data_dir
         self.activity_visualizer = ActivityVisualizer()
-        self.html_templates = HTMLTemplates(config_manager)  # 实例化HTML模板管理器
+        # 实例化HTML模板管理器（内置模板 + 数据目录下 WebUI 安装的自定义模板）
+        self.html_templates = HTMLTemplates(
+            config_manager, Path(data_dir) / "custom_templates"
+        )
+        # 报告归档：每份成功生成的报告保存一份 HTML，供 WebUI 报告历史查看
+        self.report_archive = ReportArchive(
+            data_dir, lambda: config_manager.get_report_archive_days()
+        )
         # 全局 T2I 渲染信号量，保护本地资源
         # 使用专用的 T2I 并发配置项
         max_concurrent = self.config_manager.get_t2i_max_concurrent()
@@ -351,6 +360,7 @@ class ReportGenerator(IReportGenerator):
             tuple[str | None, str | None]: (image_url, html_content)
         """
         html_content = None
+        set_stage("渲染报告")
         try:
             # 准备渲染数据
             render_payload = await self._prepare_render_data(
@@ -462,10 +472,16 @@ class ReportGenerator(IReportGenerator):
                                     logger.info(
                                         f"图片生成成功 (轮次 {attempt}): [Base64 Data {len(image_data)} bytes]"
                                     )
+                                    await self._archive_report(
+                                        html_content, group_id, analysis_result
+                                    )
                                     return image_url, html_content
                                 elif isinstance(image_data, str):
                                     logger.info(
                                         f"图片生成成功 (轮次 {attempt}): {image_data}"
+                                    )
+                                    await self._archive_report(
+                                        html_content, group_id, analysis_result
                                     )
                                     return image_data, html_content
 
@@ -538,6 +554,7 @@ class ReportGenerator(IReportGenerator):
             html_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 准备渲染数据
+            set_stage("生成 HTML 报告")
             render_data = await self._prepare_render_data(
                 analysis_result,
                 chart_template="activity_chart.html",
@@ -585,6 +602,7 @@ class ReportGenerator(IReportGenerator):
                 html_path.write_text, html_content, encoding="utf-8"
             )
             logger.info(f"HTML 报告已保存: {html_path}")
+            await self._archive_report(html_content, group_id, analysis_result)
 
             def json_default_encoder(obj):
                 if hasattr(obj, "to_dict") and callable(obj.to_dict):
@@ -624,6 +642,52 @@ class ReportGenerator(IReportGenerator):
         except Exception as e:
             logger.error(f"生成 HTML 报告失败: {e}", exc_info=True)
             return None, None
+
+    async def _archive_report(
+        self, html_content: str, group_id: str, analysis_result: dict
+    ) -> None:
+        """把成功生成的报告存进归档；失败只记警告，不影响报告发送"""
+        try:
+            task = current_task()
+            stats = analysis_result.get("statistics")
+            await asyncio.to_thread(
+                self.report_archive.add,
+                html_content,
+                group_id=group_id,
+                group_name=getattr(task, "group_name", "") or "",
+                platform_id=getattr(task, "platform_id", "") or "",
+                template=self.config_manager.get_report_template(),
+                source=getattr(task, "source", "") or "",
+                message_count=getattr(stats, "message_count", 0),
+                participant_count=getattr(stats, "participant_count", 0),
+            )
+        except Exception as e:
+            logger.warning(f"报告归档失败（不影响发送）: {e}")
+
+    async def render_preview_html(
+        self, analysis_result: dict, template_name: str
+    ) -> str:
+        """用指定模板把（示例）分析结果渲染成图片报告 HTML，不截图、不联网取头像"""
+        default_avatar = self._get_default_avatar_base64()
+
+        async def avatar_getter(_user_id: str) -> str:
+            return default_avatar
+
+        with use_template(template_name):
+            payload = await self._prepare_render_data(
+                analysis_result,
+                chart_template="activity_chart.html",
+                avatar_url_getter=avatar_getter,
+                avatar_cache_namespace="webui_preview",
+            )
+            html_content = self.html_templates.render_template(
+                "image_template.html", **payload
+            )
+        return self._reuse_avatars_in_final_html(
+            html_content,
+            payload.get("avatar_reuse_registry", {}),
+            payload.get("avatar_reuse_aliases", {}),
+        )
 
     def build_html_caption(self, html_path: str) -> str:
         """根据 html_base_url 生成 HTML 报告链接 caption"""

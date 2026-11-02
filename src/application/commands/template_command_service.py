@@ -7,27 +7,18 @@ import os
 
 from astrbot.api.message_components import Image, Node, Nodes, Plain
 
+from ...infrastructure.reporting.template_catalog import TemplateCatalog
+
 
 class TemplateCommandService:
     """封装模板命令的文件系统与消息构建逻辑。"""
 
     _CIRCLE_NUMBERS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 
-    def __init__(self, plugin_root: str):
+    def __init__(self, plugin_root: str, catalog: TemplateCatalog):
         self.plugin_root = plugin_root
-
-    def resolve_template_base_dir(self) -> str:
-        """解析报告模板目录（兼容新旧目录结构）。"""
-        candidate_dirs = [
-            os.path.join(
-                self.plugin_root, "src", "infrastructure", "reporting", "templates"
-            ),
-            os.path.join(self.plugin_root, "src", "reports", "templates"),
-        ]
-        for candidate in candidate_dirs:
-            if os.path.isdir(candidate):
-                return candidate
-        return candidate_dirs[0]
+        # 与渲染器共用同一份模板目录，自定义模板也能被列出和切换
+        self.catalog = catalog
 
     def resolve_template_preview_path(self, template_name: str) -> str | None:
         """解析模板预览图路径。"""
@@ -40,27 +31,12 @@ class TemplateCommandService:
         return None
 
     async def list_available_templates(self) -> list[str]:
-        """列出所有可用模板。"""
-        template_base_dir = self.resolve_template_base_dir()
-
-        def _list_templates_sync() -> list[str]:
-            if os.path.exists(template_base_dir):
-                return sorted(
-                    [
-                        d
-                        for d in os.listdir(template_base_dir)
-                        if os.path.isdir(os.path.join(template_base_dir, d))
-                        and not d.startswith("__")
-                    ]
-                )
-            return []
-
-        return await asyncio.to_thread(_list_templates_sync)
+        """列出所有可用模板（内置在前，自定义在后）。"""
+        return await asyncio.to_thread(self.catalog.list_names)
 
     async def template_exists(self, template_name: str) -> bool:
-        """检查模板目录是否存在。"""
-        template_dir = os.path.join(self.resolve_template_base_dir(), template_name)
-        return await asyncio.to_thread(os.path.exists, template_dir)
+        """检查模板是否存在。"""
+        return await asyncio.to_thread(self.catalog.exists, template_name)
 
     def parse_template_input(
         self, template_input: str, available_templates: list[str]

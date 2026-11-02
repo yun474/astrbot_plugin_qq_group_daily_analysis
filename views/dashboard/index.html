@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>群分析</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>群分析</h1>
+      <nav class="tabs" id="tabs">
+        <button data-tab="reports" class="active">报告历史</button>
+        <button data-tab="templates">模板管理</button>
+        <button data-tab="tasks">任务状态</button>
+        <button data-tab="logs">插件日志</button>
+      </nav>
+    </header>
+    <main>
+      <section id="tab-reports" class="tab-panel active"></section>
+      <section id="tab-templates" class="tab-panel"></section>
+      <section id="tab-tasks" class="tab-panel"></section>
+      <section id="tab-logs" class="tab-panel"></section>
+    </main>
+    <div id="toast-root"></div>
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>

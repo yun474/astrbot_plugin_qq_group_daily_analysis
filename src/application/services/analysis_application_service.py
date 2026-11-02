@@ -27,6 +27,7 @@ from ...domain.services.incremental_merge_service import IncrementalMergeService
 from ...domain.services.statistics_service import StatisticsService
 from ...domain.value_objects.unified_message import UnifiedMessage
 from ...infrastructure.persistence.incremental_store import IncrementalStore
+from ...shared.task_context import set_stage
 from ...utils.logger import logger
 
 
@@ -164,6 +165,7 @@ class AnalysisApplicationService:
                     ) from e
 
             # 2. 拉取消息
+            set_stage("获取消息")
             if days is None:
                 days = self.config_manager.get_analysis_days()
             max_count = self.config_manager.get_max_messages()
@@ -228,6 +230,7 @@ class AnalysisApplicationService:
                 user_activity, limit=max_user_titles
             )
 
+            set_stage("大模型分析")
             # 5. LLM 语义分析 (为了保持兼容，目前直接传 UnifiedMessage，后续如需传 raw dict 再加转换)
             # LLMAnalyzer 内部可能已经处理了转换（见之前代码）
             topic_enabled = self.config_manager.get_topic_analysis_enabled()
@@ -364,12 +367,14 @@ class AnalysisApplicationService:
                     logger.warning(f"检查群 {group_id} 禁言状态时出错: {e}")
 
             # 2. 拉取消息，获取进度并确定拉取量
+            set_stage("获取消息")
             last_analyzed_ts = await self.incremental_store.get_last_analyzed_timestamp(
                 group_id
             )
             days = self.config_manager.get_analysis_days()
-            # 在增量模式下，拉取上限由安全限制 (Safe Count) 统一控制，确保能追平进度且不溢出
-            max_count = self.config_manager.get_incremental_safe_limit()
+            min_messages = self.config_manager.get_incremental_min_messages()
+            # 增量按消息条数触发，单次拉取上限沿用全局最大消息数（至少覆盖一个批次）
+            max_count = max(self.config_manager.get_max_messages(), min_messages)
 
             # 3. 拉取消息（优先从上次进度点开始回溯，确保不遗漏高活跃期间的 Gap）
             raw_messages = await adapter.fetch_messages(
@@ -398,14 +403,17 @@ class AnalysisApplicationService:
                     msg for msg in unified_messages if msg.timestamp > last_analyzed_ts
                 ]
 
-            # 5. 检查最小消息阈值
-            min_messages = self.config_manager.get_incremental_min_messages()
+            # 5. 检查最小消息阈值（返回实际条数，供消息计数器校正）
             if len(unified_messages) < min_messages:
                 logger.info(
                     f"群 {group_id} 增量分析：新消息数 ({len(unified_messages)}) "
                     f"未达到阈值 ({min_messages})，跳过本次分析"
                 )
-                return {"success": False, "reason": "below_threshold"}
+                return {
+                    "success": False,
+                    "reason": "below_threshold",
+                    "messages_count": len(unified_messages),
+                }
 
             # 6. 计算基础统计
             statistics = await asyncio.to_thread(
@@ -423,6 +431,7 @@ class AnalysisApplicationService:
             )
 
             # 7. LLM 增量分析（仅话题 + 金句）
+            set_stage("大模型分析")
             topics_per_batch = self.config_manager.get_incremental_topics_per_batch()
             quotes_per_batch = self.config_manager.get_incremental_quotes_per_batch()
 
@@ -626,6 +635,7 @@ class AnalysisApplicationService:
             window_start = window_end - (analysis_days * 24 * 3600)
 
             # 2. 查询窗口内的所有批次
+            set_stage("合并增量批次")
             batches = await self.incremental_store.query_batches(
                 group_id, window_start, window_end
             )
@@ -659,6 +669,7 @@ class AnalysisApplicationService:
                     logger.warning(f"检查群 {group_id} 禁言状态时出错: {e}")
 
             # 6. 执行分析相关的变量准备
+            set_stage("大模型分析")
             user_titles = []
             user_title_enabled = self.config_manager.get_user_title_analysis_enabled()
             unified_msg_origin = (
