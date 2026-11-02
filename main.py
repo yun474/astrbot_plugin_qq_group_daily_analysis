@@ -12,7 +12,6 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig
-from astrbot.api import logger as astrbot_logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import PermissionType
 from astrbot.api.star import Context, Star, StarTools
@@ -48,7 +47,7 @@ from .src.infrastructure.reporting.generators import ReportGenerator
 from .src.infrastructure.reporting.local_browser_renderer import LocalBrowserRenderer
 from .src.infrastructure.scheduler.auto_scheduler import AutoScheduler
 from .src.shared.constants import PLUGIN_NAME
-from .src.shared.trace_context import TraceContext, TraceLogFilter
+from .src.shared.trace_context import TraceContext
 from .src.utils.logger import logger
 from .src.utils.resilience import GlobalRateLimiter
 
@@ -197,14 +196,6 @@ class GroupDailyAnalysis(Star):
                 return
 
             try:
-                # 注册 TraceID 过滤器
-                trace_filter = TraceLogFilter()
-                if not any(
-                    isinstance(f, TraceLogFilter) for f in astrbot_logger.filters
-                ):
-                    astrbot_logger.addFilter(trace_filter)
-                    astrbot_logger.info("[Trace] TraceID 日志追踪已启用")
-
                 logger.info(f"正在执行插件初始化 (来源: {source})...")
 
                 # 0. 自动升级旧版 prompt 模板（str.format -> string.Template）并回写配置

@@ -5,7 +5,6 @@
 """
 
 import functools
-import logging
 import re
 import uuid
 from contextvars import ContextVar, Token
@@ -219,18 +218,6 @@ class TraceContext:
         [兼容性接口] 获取当前活跃的追踪 ID 字符串。
         """
         return get_trace_id()
-
-
-class TraceLogFilter(logging.Filter):
-    """
-    日志过滤器：自动将当前的 TraceID 注入每一条日志记录中。
-
-    配合日志格式化字符串 `[%(trace_id)s]` 使用。
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.trace_id = get_trace_id()
-        return True
 
 
 def get_trace_id() -> str:

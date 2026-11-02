@@ -1,5 +1,10 @@
 # 更新日志 (CHANGELOG)
 
+## [v4.10.15] - 🛠️ 云云修复新版 AstrBot 下插件初始化失败
+*   **🚑 初始化修复**: 移除向插件 logger 注册的 `TraceLogFilter`。AstrBot 新版日志处理器在记录带 `trace_id` 时会同时读取 `span_id`，该过滤器只注入了 `trace_id`，导致插件初始化时第一条日志即抛出 `'LogRecord' object has no attribute 'span_id'`，定时分析任务因此始终未注册。
+*   **🔎 追踪不受影响**: 日志前缀中的 TraceID 由 `PluginLogger` 直接写入消息文本，移除过滤器后仍正常显示。
+*   **📌 部署提示**: 旧过滤器会一直挂在内存中的 logger 上，更新后需要重启 AstrBot，仅重载插件无法生效。
+
 ## [v4.10.14] - 🐾 云云让本地浏览器用完就走
 *   **🧹 空闲退出**: `local_browser` / `local_first` / `astrbot_first` 后端启动的本地 Chromium，在最后一次截图后空闲 2 分钟自动退出，不再常驻到插件重载；下次生成报告时自动重新启动。
 *   **🔌 卸载更干净**: 插件卸载时最先关闭本地浏览器，后续清理步骤出错也不会留下 Chromium 进程。
