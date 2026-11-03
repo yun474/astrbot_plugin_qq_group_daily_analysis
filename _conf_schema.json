@@ -19,7 +19,8 @@
                 "type": "list",
                 "description": "群组白/黑名单列表",
                 "default": [],
-                "hint": "要填的群列表。可以填完整会话ID（如 onebot:GroupMessage:123456）或只填群号（如 123456）。新手建议优先填完整会话ID，更不容易填错。可用 /sid 获取当前会话ID。",
+                "_special": "umo",
+                "hint": "要填的群列表。可在“选择会话来源”弹窗中按群名搜索勾选，也可在手动输入页填完整会话ID（如 onebot:GroupMessage:123456）或只填群号（如 123456）。可用 /sid 获取当前会话ID。需 AstrBot v4.29.4 及以上，旧版本仍为普通列表输入。",
                 "items": {
                     "type": "string"
                 }
@@ -348,7 +349,8 @@
                 "type": "list",
                 "description": "定时分析群列表",
                 "default": [],
-                "hint": "定时任务群列表。示例1：mode=whitelist + [\"onebot:GroupMessage:123456\"] => 只跑这个群。示例2：mode=blacklist + [\"onebot:GroupMessage:123456\"] => 这个群不跑，其他群跑。注意：whitelist + 空列表 = 不会开启定时任务。即使某群在增量名单里，只要不在定时白名单里，也不会自动触发。",
+                "_special": "umo",
+                "hint": "定时任务群列表，可在“选择会话来源”弹窗中搜索勾选，也可手动填写会话ID或群号。示例1：mode=whitelist + [\"onebot:GroupMessage:123456\"] => 只跑这个群。示例2：mode=blacklist + [\"onebot:GroupMessage:123456\"] => 这个群不跑，其他群跑。注意：whitelist + 空列表 = 不会开启定时任务。即使某群在增量名单里，只要不在定时白名单里，也不会自动触发。",
                 "items": {
                     "type": "string"
                 }
@@ -508,7 +510,8 @@
                 "type": "list",
                 "description": "增量分析群列表",
                 "default": [],
-                "hint": "增量分析群列表。示例1：mode=whitelist + [\"onebot:GroupMessage:123456\"] => 只有这个群增量。示例2：mode=blacklist + [\"onebot:GroupMessage:123456\"] => 这个群不用增量，其他群用增量。注意：whitelist + 空列表 = 不启用增量。只有先通过基础群权限 + 定时名单的群，才会在这里判断。",
+                "_special": "umo",
+                "hint": "增量分析群列表，可在“选择会话来源”弹窗中搜索勾选，也可手动填写会话ID或群号。示例1：mode=whitelist + [\"onebot:GroupMessage:123456\"] => 只有这个群增量。示例2：mode=blacklist + [\"onebot:GroupMessage:123456\"] => 这个群不用增量，其他群用增量。注意：whitelist + 空列表 = 不启用增量。只有先通过基础群权限 + 定时名单的群，才会在这里判断。",
                 "items": {
                     "type": "string"
                 }
